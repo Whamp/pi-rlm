@@ -152,9 +152,10 @@ write_chunks(chunks_dir, size=100000, overlap=5000)  # 100k chars with 5k overla
 
 ## Development
 
-This extension was created in a single pi session. View the development transcript:
-- [Session replay](https://buildwithpi.ai/session?73eb4c3795064fe93b5c651dd931535a)
-- Raw session: `sessions/` directory
+This extension was created and improved across multiple pi sessions:
+- [Initial implementation](https://buildwithpi.ai/session?73eb4c3795064fe93b5c651dd931535a)
+- [Handle system & manifest hints](https://buildwithpi.ai/session/#f74ebcfe6673e3a748c44de1565c0ecd)
+- Raw sessions: `sessions/` directory
 
 ## License
 

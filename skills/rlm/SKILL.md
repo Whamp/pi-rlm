@@ -43,7 +43,25 @@ If the user didn't supply arguments, ask for:
    python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> status
    ```
 
-2. **Materialize chunks as files** (so subagents can read them)
+2. **Scout the content (optional but recommended)**
+   
+   Use the handle-based search to explore without flooding your context:
+   ```bash
+   python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec -c "
+   # grep() returns a handle stub, not raw data
+   result = grep('ERROR')
+   print(result)  # e.g., '\$res1: Array(47) [preview...]'
+   
+   # Inspect without expanding
+   print(f'Found {count(\"\$res1\")} matches')
+   
+   # Expand only what you need
+   for item in expand('\$res1', limit=5):
+       print(f\"Line {item['line_num']}: {item['match']}\")
+   "
+   ```
+
+3. **Materialize chunks as files** (so subagents can read them)
    ```bash
    python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec <<'PY'
    session_dir = state_path.parent  # available in env
@@ -58,9 +76,14 @@ If the user didn't supply arguments, ask for:
    ```bash
    cat <session_dir>/chunks/manifest.json
    ```
-   The manifest contains start/end character and line positions for each chunk.
+   
+   The manifest now includes:
+   - `preview`: First few lines of each chunk
+   - `hints`: Content analysis (e.g., `likely_code`, `section_headers`, `density`)
+   
+   Use hints to skip irrelevant chunks or craft better prompts.
 
-3. **Subcall loop — use parallel mode**
+4. **Subcall loop — use parallel mode**
    
    **Always use parallel invocation** for speed. The `rlm-subcall` agent has `full-output: true` configured, so parallel mode returns complete results (not truncated previews).
 
@@ -81,14 +104,57 @@ If the user didn't supply arguments, ask for:
    python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec -c "add_buffer('<subagent result>')"
    ```
 
-4. **Synthesis**
+5. **Synthesis**
    - Once enough evidence is collected, synthesize the final answer in the main conversation.
    - Use the manifest to cite specific locations (line numbers, character positions).
    - Optionally invoke rlm-subcall once more to merge collected buffers into a coherent draft.
 
+## REPL Helpers Reference
+
+### Content Exploration
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `peek(start, end)` | `str` | View a slice of raw content |
+| `grep(pattern, max_matches=20, window=120)` | `str` (handle) | Regex search, returns handle stub |
+| `grep_raw(pattern, ...)` | `list[dict]` | Same as grep but returns raw data |
+| `chunk_indices(size, overlap)` | `list[tuple]` | Get chunk boundary positions |
+| `write_chunks(out_dir, size, overlap)` | `list[str]` | Write chunks to disk with manifest |
+| `add_buffer(text)` | `None` | Accumulate text for later synthesis |
+
+### Handle System (Token-Efficient)
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `handles()` | `str` | List all active handles |
+| `last_handle()` | `str` | Get name of most recent handle (for chaining) |
+| `expand(handle, limit=10, offset=0)` | `list` | Materialize handle data |
+| `count(handle)` | `int` | Count items without expanding |
+| `delete_handle(handle)` | `str` | Free memory |
+| `filter_handle(handle, pattern_or_fn)` | `str` (handle) | Filter and return new handle |
+| `map_field(handle, field)` | `str` (handle) | Extract field from each item |
+| `sum_field(handle, field)` | `float` | Sum numeric field values |
+
+### Handle Workflow Example
+```python
+# Search returns handle, not data
+print(grep("ERROR"))             # "$res1: Array(47) [preview...]"
+
+# Chain with last_handle()
+map_field(last_handle(), "line_num")
+print(expand(last_handle()))     # [10, 45, 89, ...]
+
+# Or use handle names directly
+result = grep("ERROR")           # "$res1: Array(47) [...]"
+print(count("$res1"))            # 47
+
+# Filter server-side
+filter_handle("$res1", "timeout")
+print(f"Timeout errors: {count(last_handle())}")
+```
+
 ## Guardrails
 
 - **Do not paste large raw chunks into the main chat context.**
+- Use handles to avoid context bloat during exploration.
 - Use the REPL to locate exact excerpts; quote only what you need.
 - Subagents cannot spawn other subagents. Any orchestration stays in the main conversation.
 - Keep scratch/state files under `.pi/rlm_state/`.

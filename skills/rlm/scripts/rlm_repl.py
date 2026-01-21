@@ -24,10 +24,20 @@ The script injects these variables into the exec environment:
 
 It also injects helpers:
   - peek(start=0, end=1000) -> str
-  - grep(pattern, max_matches=20, window=120, flags=0) -> list[dict]
+  - grep(pattern, max_matches=20, window=120, flags=0) -> str (handle stub)
+  - grep_raw(pattern, ...) -> list[dict] (raw results, no handle)
   - chunk_indices(size=200000, overlap=0) -> list[(start,end)]
   - write_chunks(out_dir, size=200000, overlap=0, prefix='chunk') -> list[str]
   - add_buffer(text: str) -> None
+
+Handle system (token-efficient result storage):
+  - handles() -> str (list all active handles)
+  - last_handle() -> str (get name of most recent handle for chaining)
+  - expand(handle, limit=10, offset=0) -> list (materialize handle data)
+  - count(handle) -> int (count items without expanding)
+  - filter_handle(handle, pattern_or_fn) -> str (new handle with filtered results)
+  - map_field(handle, field) -> str (extract single field from each item)
+  - sum_field(handle, field) -> float (sum numeric field values)
 
 Security note:
   This runs arbitrary Python via exec. Treat it like running code you wrote.
@@ -48,10 +58,12 @@ import traceback
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple, Union
 
 
 DEFAULT_RLM_STATE_DIR = Path(".pi/rlm_state")
+PREVIEW_LENGTH = 80  # Characters to show in handle previews
+MANIFEST_PREVIEW_LINES = 5  # Lines to include in chunk preview
 DEFAULT_MAX_OUTPUT_CHARS = 8000
 
 
@@ -160,34 +172,274 @@ def _count_lines_in_range(content: str, start: int, end: int) -> Tuple[int, int]
     return (start_line, end_line)
 
 
-def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_path_ref: Path):
+def _generate_chunk_hints(chunk_text: str) -> Dict[str, Any]:
+    """Generate content hints for a chunk to help main agent understand it."""
+    hints: Dict[str, Any] = {}
+    
+    lines = chunk_text.split('\n')
+    
+    # Detect section headers (markdown style)
+    headers = []
+    for line in lines[:100]:  # Check first 100 lines
+        stripped = line.strip()
+        if stripped.startswith('#') and len(stripped) > 1:
+            headers.append(stripped[:80])
+        elif stripped.startswith('##'):
+            headers.append(stripped[:80])
+    if headers:
+        hints["section_headers"] = headers[:5]  # First 5 headers
+    
+    # Detect code blocks
+    code_block_count = chunk_text.count('```')
+    if code_block_count >= 2:
+        hints["has_code_blocks"] = True
+        hints["code_block_count"] = code_block_count // 2
+    
+    # Detect if mostly code (heuristic: high density of common code chars)
+    code_chars = sum(1 for c in chunk_text if c in '{}();[]<>=')
+    if len(chunk_text) > 0:
+        code_density = code_chars / len(chunk_text)
+        if code_density > 0.02:
+            hints["likely_code"] = True
+    
+    # Detect JSON
+    stripped = chunk_text.strip()
+    if (stripped.startswith('{') and stripped.endswith('}')) or \
+       (stripped.startswith('[') and stripped.endswith(']')):
+        hints["likely_json"] = True
+    
+    # Content density classification
+    non_empty_lines = sum(1 for line in lines if line.strip())
+    if len(lines) > 0:
+        density = non_empty_lines / len(lines)
+        if density > 0.8:
+            hints["density"] = "dense"
+        elif density < 0.4:
+            hints["density"] = "sparse"
+        else:
+            hints["density"] = "normal"
+    
+    return hints
+
+
+def _generate_chunk_preview(chunk_text: str, max_lines: int = MANIFEST_PREVIEW_LINES) -> str:
+    """Generate a preview of the chunk's beginning."""
+    lines = chunk_text.split('\n')[:max_lines]
+    preview = '\n'.join(lines)
+    if len(chunk_text.split('\n')) > max_lines:
+        preview += '\n...'
+    return preview
+
+
+def _make_handle_stub(handle: str, data: List[Any]) -> str:
+    """Create a compact stub representation for a handle."""
+    if not data:
+        return f"{handle}: Array(0) []"
+    
+    # Get preview from first item
+    first = data[0]
+    preview = ""
+    if isinstance(first, dict):
+        # For grep results, show snippet or line
+        if "snippet" in first:
+            preview = first["snippet"][:PREVIEW_LENGTH]
+        elif "line" in first:
+            preview = first["line"][:PREVIEW_LENGTH]
+        elif "match" in first:
+            preview = first["match"][:PREVIEW_LENGTH]
+        else:
+            # Show first key-value pair
+            for k, v in first.items():
+                preview = f"{k}: {str(v)[:40]}"
+                break
+    else:
+        preview = str(first)[:PREVIEW_LENGTH]
+    
+    # Clean up preview (remove newlines, excess whitespace)
+    preview = ' '.join(preview.split())
+    if len(preview) > PREVIEW_LENGTH:
+        preview = preview[:PREVIEW_LENGTH-3] + "..."
+    
+    return f"{handle}: Array({len(data)}) [{preview}]"
+
+
+def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref: Dict[str, Any], state_path_ref: Path):
+    # Ensure handles dict exists in state
+    if "handles" not in state_ref:
+        state_ref["handles"] = {}
+    if "handle_counter" not in state_ref:
+        state_ref["handle_counter"] = 0
+    
+    handles_ref = state_ref["handles"]
+    
+    def _store_handle(data: List[Any]) -> str:
+        """Internal: store data and return handle stub."""
+        state_ref["handle_counter"] += 1
+        handle = f"$res{state_ref['handle_counter']}"
+        handles_ref[handle] = data
+        return _make_handle_stub(handle, data)
+    
     # These close over context_ref/buffers_ref so changes persist.
     def peek(start: int = 0, end: int = 1000) -> str:
         content = context_ref.get("content", "")
         return content[start:end]
 
-    def grep(
+    def grep_raw(
         pattern: str,
         max_matches: int = 20,
         window: int = 120,
         flags: int = 0,
     ) -> List[Dict[str, Any]]:
+        """Search content and return raw results (no handle)."""
         content = context_ref.get("content", "")
         out: List[Dict[str, Any]] = []
         for m in re.finditer(pattern, content, flags):
             start, end = m.span()
             snippet_start = max(0, start - window)
             snippet_end = min(len(content), end + window)
+            # Calculate line number
+            line_num = content[:start].count('\n') + 1
             out.append(
                 {
                     "match": m.group(0),
                     "span": (start, end),
+                    "line_num": line_num,
                     "snippet": content[snippet_start:snippet_end],
                 }
             )
             if len(out) >= max_matches:
                 break
         return out
+
+    def grep(
+        pattern: str,
+        max_matches: int = 20,
+        window: int = 120,
+        flags: int = 0,
+    ) -> str:
+        """Search content and return handle stub (token-efficient)."""
+        results = grep_raw(pattern, max_matches, window, flags)
+        return _store_handle(results)
+    
+    # === Handle System ===
+    
+    def handles() -> str:
+        """List all active handles with their sizes."""
+        if not handles_ref:
+            return "No active handles."
+        lines = []
+        for h in sorted(handles_ref.keys(), key=lambda x: int(x.replace('$res', ''))):
+            data = handles_ref[h]
+            lines.append(f"  {h}: Array({len(data)})")
+        return "Active handles:\n" + "\n".join(lines)
+    
+    def last_handle() -> str:
+        """Return the name of the most recently created handle (for chaining)."""
+        if state_ref["handle_counter"] == 0:
+            raise ValueError("No handles created yet")
+        return f"$res{state_ref['handle_counter']}"
+    
+    def expand(handle: str, limit: int = 10, offset: int = 0) -> List[Any]:
+        """Expand a handle to see its data (with optional pagination)."""
+        if handle not in handles_ref:
+            raise ValueError(f"Unknown handle: {handle}")
+        data = handles_ref[handle]
+        return data[offset:offset + limit]
+    
+    def count(handle: str) -> int:
+        """Get count of items in a handle without expanding."""
+        if handle not in handles_ref:
+            raise ValueError(f"Unknown handle: {handle}")
+        return len(handles_ref[handle])
+    
+    def delete_handle(handle: str) -> str:
+        """Delete a handle to free memory."""
+        if handle not in handles_ref:
+            return f"Handle {handle} not found."
+        del handles_ref[handle]
+        return f"Deleted {handle}."
+    
+    def filter_handle(handle: str, predicate: Union[str, Callable]) -> str:
+        """Filter handle data and return new handle.
+        
+        Args:
+            handle: Source handle (e.g., '$res1')
+            predicate: Either a regex pattern string (searches in 'snippet', 'line', or 'match' fields)
+                      or a callable that takes an item and returns bool
+        
+        Returns:
+            New handle stub with filtered results
+        """
+        if handle not in handles_ref:
+            raise ValueError(f"Unknown handle: {handle}")
+        
+        data = handles_ref[handle]
+        
+        if isinstance(predicate, str):
+            # Treat as regex pattern
+            pattern = re.compile(predicate)
+            def match_fn(item: Any) -> bool:
+                if isinstance(item, dict):
+                    for key in ('snippet', 'line', 'match', 'content', 'text'):
+                        if key in item and pattern.search(str(item[key])):
+                            return True
+                    return False
+                return bool(pattern.search(str(item)))
+            filtered = [item for item in data if match_fn(item)]
+        else:
+            # Treat as callable
+            filtered = [item for item in data if predicate(item)]
+        
+        return _store_handle(filtered)
+    
+    def map_field(handle: str, field: str) -> str:
+        """Extract a single field from each item, return new handle.
+        
+        Args:
+            handle: Source handle
+            field: Field name to extract (e.g., 'match', 'line_num')
+        
+        Returns:
+            New handle stub with extracted values
+        """
+        if handle not in handles_ref:
+            raise ValueError(f"Unknown handle: {handle}")
+        
+        data = handles_ref[handle]
+        extracted = []
+        for item in data:
+            if isinstance(item, dict) and field in item:
+                extracted.append(item[field])
+            else:
+                extracted.append(None)
+        
+        return _store_handle(extracted)
+    
+    def sum_field(handle: str, field: str = None) -> float:
+        """Sum numeric values in handle data.
+        
+        Args:
+            handle: Source handle
+            field: Optional field name. If None, sums items directly.
+        
+        Returns:
+            Sum of numeric values
+        """
+        if handle not in handles_ref:
+            raise ValueError(f"Unknown handle: {handle}")
+        
+        data = handles_ref[handle]
+        total = 0.0
+        for item in data:
+            if field and isinstance(item, dict):
+                val = item.get(field, 0)
+            else:
+                val = item
+            try:
+                total += float(val)
+            except (TypeError, ValueError):
+                pass
+        return total
 
     def chunk_indices(size: int = 200_000, overlap: int = 0) -> List[Tuple[int, int]]:
         if size <= 0:
@@ -214,7 +466,21 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_pat
         overlap: int = 0,
         prefix: str = "chunk",
         encoding: str = "utf-8",
+        include_hints: bool = True,
     ) -> List[str]:
+        """Write content chunks to files and generate manifest.
+        
+        Args:
+            out_dir: Output directory for chunks
+            size: Chunk size in characters
+            overlap: Overlap between chunks in characters
+            prefix: Filename prefix for chunks
+            encoding: File encoding
+            include_hints: If True, add preview and content hints to manifest
+        
+        Returns:
+            List of chunk file paths
+        """
         content = context_ref.get("content", "")
         spans = chunk_indices(size=size, overlap=overlap)
         out_path = Path(out_dir)
@@ -227,18 +493,28 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_pat
             chunk_id = f"{prefix}_{i:04d}"
             chunk_file = f"{chunk_id}.txt"
             p = out_path / chunk_file
-            p.write_text(content[s:e], encoding=encoding)
+            chunk_text = content[s:e]
+            p.write_text(chunk_text, encoding=encoding)
             paths.append(str(p))
             
             start_line, end_line = _count_lines_in_range(content, s, e)
-            manifest_chunks.append({
+            
+            chunk_meta: Dict[str, Any] = {
                 "id": chunk_id,
                 "file": chunk_file,
                 "start_char": s,
                 "end_char": e,
                 "start_line": start_line,
                 "end_line": end_line,
-            })
+            }
+            
+            if include_hints:
+                chunk_meta["preview"] = _generate_chunk_preview(chunk_text)
+                hints = _generate_chunk_hints(chunk_text)
+                if hints:
+                    chunk_meta["hints"] = hints
+            
+            manifest_chunks.append(chunk_meta)
         
         # Write manifest.json
         session_dir = state_path_ref.parent
@@ -246,8 +522,10 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_pat
             "session": session_dir.name,
             "context_file": context_ref.get("path", "unknown"),
             "total_chars": len(content),
+            "total_lines": content.count('\n') + 1,
             "chunk_size": size,
             "overlap": overlap,
+            "chunk_count": len(manifest_chunks),
             "chunks": manifest_chunks,
         }
         manifest_path = out_path / "manifest.json"
@@ -259,11 +537,22 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_pat
         buffers_ref.append(str(text))
 
     return {
+        # Content exploration
         "peek": peek,
         "grep": grep,
+        "grep_raw": grep_raw,
         "chunk_indices": chunk_indices,
         "write_chunks": write_chunks,
         "add_buffer": add_buffer,
+        # Handle system
+        "handles": handles,
+        "last_handle": last_handle,
+        "expand": expand,
+        "count": count,
+        "delete_handle": delete_handle,
+        "filter_handle": filter_handle,
+        "map_field": map_field,
+        "sum_field": sum_field,
     }
 
 
@@ -278,13 +567,15 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     content = _read_text_file(ctx_path, max_bytes=args.max_bytes)
     state: Dict[str, Any] = {
-        "version": 1,
+        "version": 2,  # Bumped for handle system
         "context": {
             "path": str(ctx_path),
             "loaded_at": time.time(),
             "content": content,
         },
         "buffers": [],
+        "handles": {},
+        "handle_counter": 0,
         "globals": {},
     }
     _save_state(state, state_path)
@@ -301,6 +592,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     ctx = state.get("context", {})
     content = ctx.get("content", "")
     buffers = state.get("buffers", [])
+    handles = state.get("handles", {})
     g = state.get("globals", {})
 
     print("RLM REPL status")
@@ -309,10 +601,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  Context path: {ctx.get('path')}")
     print(f"  Context chars: {len(content):,}")
     print(f"  Buffers: {len(buffers)}")
+    print(f"  Handles: {len(handles)}")
     print(f"  Persisted vars: {len(g)}")
     if args.show_vars and g:
         for k in sorted(g.keys()):
             print(f"    - {k}")
+    if args.show_vars and handles:
+        print("  Active handles:")
+        for h in sorted(handles.keys(), key=lambda x: int(x.replace('$res', ''))):
+            print(f"    - {h}: Array({len(handles[h])})")
     return 0
 
 
@@ -367,7 +664,7 @@ def cmd_exec(args: argparse.Namespace) -> int:
     env["state_path"] = state_path
     env["session_dir"] = state_path.parent
 
-    helpers = _make_helpers(ctx, buffers, state_path)
+    helpers = _make_helpers(ctx, buffers, state, state_path)
     env.update(helpers)
 
     # Capture output.
