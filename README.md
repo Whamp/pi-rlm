@@ -144,14 +144,6 @@ Adjust chunk size in your `/skill:rlm` invocation or when calling `write_chunks(
 write_chunks(chunks_dir, size=100000, overlap=5000)  # 100k chars with 5k overlap
 ```
 
-## Performance Notes
-
-| File Size | Performance |
-|-----------|-------------|
-| 1-50MB | ✓ Works well |
-| 50-100MB | ⚠ Slower but functional |
-| 500MB+ | ✗ Consider splitting first |
-
 ## Development
 
 This extension was created and improved across multiple pi sessions:
