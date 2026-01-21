@@ -757,6 +757,8 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
         Args:
             prompt: The prompt to send to the sub-agent.
             cleanup: If True (default), remove sub-session state after completion.
+                    Note: If preserve_recursive_state was set at init, cleanup
+                    will be forced to False for debugging purposes.
         
         Returns:
             The text response from the sub-agent, or an error string on failure.
@@ -767,13 +769,18 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
         # Get remaining depth from state, with migration support
         remaining_depth = state_ref.get("remaining_depth", DEFAULT_MAX_DEPTH)
         
+        # Phase 2: Respect preserve_recursive_state flag
+        # If set at init, force cleanup=False for debugging
+        preserve_recursive_state = state_ref.get("preserve_recursive_state", False)
+        effective_cleanup = cleanup and not preserve_recursive_state
+        
         # Use the global semaphore to limit concurrent spawns
         with _GLOBAL_CONCURRENCY_SEMAPHORE:
             return _spawn_sub_agent(
                 prompt=prompt,
                 remaining_depth=remaining_depth,
                 session_dir=state_path_ref.parent,
-                cleanup=cleanup,
+                cleanup=effective_cleanup,
             )
 
     return {
@@ -807,12 +814,16 @@ def cmd_init(args: argparse.Namespace) -> int:
     else:
         state_path = _create_session_path(ctx_path)
 
+    # Phase 2: Use CLI args for depth settings
+    max_depth = args.max_depth
+    preserve_recursive_state = args.preserve_recursive_state
+
     content = _read_text_file(ctx_path, max_bytes=args.max_bytes)
     state: Dict[str, Any] = {
         "version": 3,  # Phase 1: Added depth tracking
-        "max_depth": DEFAULT_MAX_DEPTH,
-        "remaining_depth": DEFAULT_MAX_DEPTH,
-        "preserve_recursive_state": False,
+        "max_depth": max_depth,
+        "remaining_depth": max_depth,
+        "preserve_recursive_state": preserve_recursive_state,
         "context": {
             "path": str(ctx_path),
             "loaded_at": time.time(),
@@ -829,6 +840,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"Session path: {state_path}")
     print(f"Session directory: {state_path.parent}")
     print(f"Context: {ctx_path} ({len(content):,} chars)")
+    print(f"Max depth: {max_depth}")
+    if preserve_recursive_state:
+        print("Preserve recursive state: enabled")
     return 0
 
 
@@ -840,12 +854,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     buffers = state.get("buffers", [])
     handles = state.get("handles", {})
     g = state.get("globals", {})
+    
+    # Phase 2: Include depth info in status
+    max_depth = state.get("max_depth", DEFAULT_MAX_DEPTH)
+    remaining_depth = state.get("remaining_depth", DEFAULT_MAX_DEPTH)
+    preserve_recursive_state = state.get("preserve_recursive_state", False)
 
     print("RLM REPL status")
     print(f"  State file: {args.state}")
     print(f"  Session directory: {state_path.parent}")
     print(f"  Context path: {ctx.get('path')}")
     print(f"  Context chars: {len(content):,}")
+    print(f"  Max depth: {max_depth}")
+    print(f"  Remaining depth: {remaining_depth}")
+    if preserve_recursive_state:
+        print("  Preserve recursive state: enabled")
     print(f"  Buffers: {len(buffers)}")
     print(f"  Handles: {len(handles)}")
     print(f"  Persisted vars: {len(g)}")
@@ -1002,6 +1025,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Optional cap on bytes read from the context file",
+    )
+    p_init.add_argument(
+        "--max-depth",
+        type=int,
+        default=DEFAULT_MAX_DEPTH,
+        help=f"Maximum recursion depth for sub-LLM calls (default: {DEFAULT_MAX_DEPTH})",
+    )
+    p_init.add_argument(
+        "--preserve-recursive-state",
+        action="store_true",
+        help="Keep sub-session directories after completion (for debugging)",
     )
     p_init.set_defaults(func=cmd_init)
 

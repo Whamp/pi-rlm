@@ -45,3 +45,63 @@ State version verified: 3 with all depth tracking fields.
 - No deviations from plan
 - Tests use subprocess mocking for fast unit tests, real pi spawning for slow tests
 - The `depth_level` in logs represents remaining_depth at call time (3 = root level)
+
+---
+
+## Phase 2: Depth Tracking & Recursive State
+**Completed:** 2026-01-21T14:03:00-08:00
+
+### Implemented
+- `--max-depth N` argument for `init` command (default: 3 per paper spec)
+- `--preserve-recursive-state` flag for debugging (keeps sub-session directories)
+- `cmd_init()` updated to use CLI args for depth settings
+- `cmd_status()` updated to display depth info in status output
+- `llm_query()` updated to respect `preserve_recursive_state` flag (forces cleanup=False)
+
+### Files Modified
+- `skills/rlm/scripts/rlm_repl.py` - Modified ~50 lines (CLI args, cmd_init, cmd_status, llm_query)
+- `skills/rlm/tests/test_phase2_depth.py` - New (23 tests: 22 unit, 1 slow integration)
+
+### Validation Results
+```
+$ pytest skills/rlm/tests/test_phase2_depth.py -v
+======================== 22 passed, 1 skipped in 0.55s =========================
+
+$ pytest skills/rlm/tests/test_phase1_llm_query.py skills/rlm/tests/test_phase2_depth.py -v
+======================== 47 passed, 3 skipped in 0.67s =========================
+
+$ pytest skills/rlm/tests/test_phase2_depth.py -v --slow -k "test_goal_"
+======================= 4 passed, 19 deselected in 2.16s =======================
+```
+
+Manual smoke test:
+```
+$ python3 rlm_repl.py init README.md --max-depth 2
+Session path: .pi/rlm_state/readme-20260121-140242/state.pkl
+...
+Max depth: 2
+
+$ python3 rlm_repl.py --state ... status
+...
+  Max depth: 2
+  Remaining depth: 2
+...
+
+$ python3 rlm_repl.py init README.md --preserve-recursive-state
+Session path: .pi/rlm_state/readme-20260121-140247/state.pkl
+...
+Preserve recursive state: enabled
+```
+
+### Goal-Alignment Verification
+- [x] `--max-depth N` sets both `max_depth` and `remaining_depth`
+- [x] Sub-agent receives decremented depth via `RLM_REMAINING_DEPTH` in system prompt
+- [x] Depth-0 returns error without spawning subprocess
+- [x] Directory structure matches `depth-N/q_xxx` pattern
+- [x] Default depth is 3 (per paper spec)
+
+### Notes
+- No deviations from plan
+- Recursive directory structure was already implemented in Phase 1; Phase 2 just adds CLI configuration
+- `preserve_recursive_state` affects both direct `cleanup` param and state-based cleanup override
+
