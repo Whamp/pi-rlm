@@ -1,6 +1,6 @@
 ---
 name: rlm
-description: Process files too large to fit in context (>100KB, >2000 lines). MUST USE when reading large logs, documentation, transcripts, codebases, or data dumps. Chunks content, delegates to subagents, synthesizes results. Triggers: large file, big document, massive log, full codebase, entire repo, long transcript, huge context, won't fit in context, too long to read, context window exceeded.
+description: Process files too large to fit in context (>100KB, >2000 lines). MUST USE when reading large logs, documentation, transcripts, codebases, or data dumps. Chunks content, delegates to subagents, synthesizes results. Triggers - large file, big document, massive log, full codebase, entire repo, long transcript, huge context, won't fit in context, too long to read, context window exceeded.
 ---
 
 # rlm (Recursive Language Model workflow)
