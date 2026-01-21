@@ -4,6 +4,36 @@ An RLM (Recursive Language Model) extension for [pi](https://github.com/mariozec
 
 Based on the RLM pattern from [arXiv:2512.24601](https://arxiv.org/abs/2512.24601).
 
+## Prerequisites
+
+This extension requires the **subagent extension** for pi, which enables delegating tasks to specialized sub-agents.
+
+### Installing the Subagent Extension
+
+1. Clone or copy the subagent extension to your pi extensions directory:
+
+```bash
+# Option A: From dotfiles repo (if available)
+git clone https://github.com/Whamp/dotfiles.git /tmp/dotfiles
+cp -r /tmp/dotfiles/.pi/agent/extensions/subagent ~/.pi/agent/extensions/
+
+# Option B: Create manually (see structure below)
+mkdir -p ~/.pi/agent/extensions/subagent
+```
+
+2. The subagent extension structure:
+```
+~/.pi/agent/extensions/subagent/
+├── index.ts        # Main extension entry point
+├── agents.ts       # Agent discovery logic
+├── package.json    # NPM package
+└── README.md       # Documentation
+```
+
+3. Verify it's working by checking if `subagent` appears in pi's available tools.
+
+> **Note:** The subagent extension spawns separate pi processes to handle delegated tasks. Each sub-agent runs in an isolated context, which is essential for the RLM pattern where chunk processing must not pollute the main context.
+
 ## What is RLM?
 
 The Recursive Language Model pattern breaks down large documents into manageable chunks, processes each with a specialized sub-LLM, then synthesizes results in the main agent. This allows you to analyze textbooks, massive documentation, log dumps, or any context too large to paste into chat.
