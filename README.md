@@ -128,6 +128,12 @@ write_chunks(chunks_dir, size=100000, overlap=5000)  # 100k chars with 5k overla
 | 50-100MB | ⚠ Slower but functional |
 | 500MB+ | ✗ Consider splitting first |
 
+## Development
+
+This extension was created in a single pi session. View the development transcript:
+- [Session replay](https://buildwithpi.ai/session?73eb4c3795064fe93b5c651dd931535a)
+- Raw session: `sessions/` directory
+
 ## License
 
 MIT
