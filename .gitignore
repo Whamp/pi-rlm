@@ -1,0 +1,19 @@
+# RLM state directories (created during usage)
+.pi/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
