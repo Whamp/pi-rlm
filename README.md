@@ -53,7 +53,7 @@ The Recursive Language Model pattern breaks down large documents into manageable
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/pi-rlm.git ~/projects/pi-rlm
+git clone https://github.com/Whamp/pi-rlm.git ~/projects/pi-rlm
 
 # Symlink the skill
 ln -s ~/projects/pi-rlm/skills/rlm ~/skills/rlm
@@ -66,7 +66,7 @@ ln -s ~/projects/pi-rlm/agents/rlm-subcall.md ~/.pi/agent/agents/rlm-subcall.md
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/pi-rlm.git /tmp/pi-rlm
+git clone https://github.com/Whamp/pi-rlm.git /tmp/pi-rlm
 
 # Copy the skill
 cp -r /tmp/pi-rlm/skills/rlm ~/skills/
