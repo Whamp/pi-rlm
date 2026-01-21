@@ -1,0 +1,47 @@
+# RLM Alignment Progress Notes
+
+## Phase 1: Core `llm_query()` Infrastructure
+**Completed:** 2026-01-21T13:57:15-08:00
+
+### Implemented
+- `_parse_pi_json_output(output)` - Extracts final assistant text from pi --mode json streaming JSONL output
+- `_log_query(session_dir, entry)` - Appends query entries to `llm_queries.jsonl` with automatic timestamping
+- `_spawn_sub_agent(prompt, remaining_depth, session_dir, cleanup, model, timeout)` - Spawns full pi subprocess for sub-queries
+- `llm_query(prompt, cleanup=True)` - Exposed helper in REPL exec environment, uses global semaphore
+- `_GLOBAL_CONCURRENCY_SEMAPHORE` - Global threading semaphore limiting concurrent spawns to 5
+- `_migrate_state_v2_to_v3(state)` - Auto-migrates v2 states to v3 schema
+- State version 3 schema with: `max_depth`, `remaining_depth`, `preserve_recursive_state`, `final_answer`
+
+### Files Modified
+- `skills/rlm/scripts/rlm_repl.py` - Added ~200 lines for LLM query infrastructure
+- `skills/rlm/tests/__init__.py` - New (package marker)
+- `skills/rlm/tests/conftest.py` - New (shared fixtures: `init_session`, `run_exec`, `--slow` marker)
+- `skills/rlm/tests/test_phase1_llm_query.py` - New (27 tests: 25 unit, 2 slow integration)
+
+### Validation Results
+```
+$ pytest skills/rlm/tests/test_phase1_llm_query.py -v
+======================== 25 passed, 2 skipped in 0.15s =========================
+
+$ pytest skills/rlm/tests/test_phase1_llm_query.py -v --slow -k "test_goal_"
+======================= 2 passed, 25 deselected in 3.51s =======================
+```
+
+Manual smoke test:
+```
+$ python3 rlm_repl.py init test.txt
+Session path: .pi/rlm_state/test-20260121-135659/state.pkl
+
+$ python3 rlm_repl.py --state ... exec -c 'result = llm_query("Say only: PONG"); print(result)'
+PONG
+
+$ cat .../llm_queries.jsonl
+{"query_id": "q_e2382286", "status": "success", "duration_ms": 1898, ...}
+```
+
+State version verified: 3 with all depth tracking fields.
+
+### Notes
+- No deviations from plan
+- Tests use subprocess mocking for fast unit tests, real pi spawning for slow tests
+- The `depth_level` in logs represents remaining_depth at call time (3 = root level)

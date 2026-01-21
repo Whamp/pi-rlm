@@ -51,17 +51,28 @@ import json
 import os
 import pickle
 import re
+import shutil
+import subprocess
 import sys
 import textwrap
+import threading
 import time
 import traceback
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 
 DEFAULT_RLM_STATE_DIR = Path(".pi/rlm_state")
+DEFAULT_MAX_DEPTH = 3
+DEFAULT_LLM_TIMEOUT = 120
+DEFAULT_LLM_MODEL = "google/gemini-2.0-flash-lite"
+
+# Global concurrency semaphore - limits concurrent sub-agent spawns to 5
+_GLOBAL_CONCURRENCY_SEMAPHORE = threading.Semaphore(5)
 PREVIEW_LENGTH = 80  # Characters to show in handle previews
 MANIFEST_PREVIEW_LINES = 5  # Lines to include in chunk preview
 DEFAULT_MAX_OUTPUT_CHARS = 8000
@@ -98,6 +109,23 @@ def _create_session_path(context_path: Path) -> Path:
     return session_dir / "state.pkl"
 
 
+def _migrate_state_v2_to_v3(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Migrate state from version 2 to version 3.
+    
+    Adds depth tracking fields for recursive sub-agent support.
+    """
+    if state.get("version", 1) >= 3:
+        return state
+    
+    state["version"] = 3
+    state["max_depth"] = DEFAULT_MAX_DEPTH
+    state["remaining_depth"] = DEFAULT_MAX_DEPTH
+    state["preserve_recursive_state"] = False
+    state["final_answer"] = None
+    
+    return state
+
+
 def _load_state(state_path: Path) -> Dict[str, Any]:
     if not state_path.exists():
         raise RlmReplError(
@@ -107,6 +135,10 @@ def _load_state(state_path: Path) -> Dict[str, Any]:
         state = pickle.load(f)
     if not isinstance(state, dict):
         raise RlmReplError(f"Corrupt state file: {state_path}")
+    
+    # Auto-migrate to v3 if needed
+    state = _migrate_state_v2_to_v3(state)
+    
     return state
 
 
@@ -170,6 +202,184 @@ def _count_lines_in_range(content: str, start: int, end: int) -> Tuple[int, int]
     end_line = content[:end].count('\n') + 1
     
     return (start_line, end_line)
+
+
+# =============================================================================
+# LLM Query Infrastructure (Phase 1)
+# =============================================================================
+
+def _parse_pi_json_output(output: str) -> str:
+    """Extract final assistant text from pi --mode json output.
+    
+    The output is streaming JSONL. We look for the final message_end event
+    with role="assistant" and extract the text content.
+    
+    Returns:
+        The extracted text, or empty string if not found.
+    """
+    lines = output.strip().split('\n')
+    
+    # Look for message_end with role=assistant from the end
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+            if event.get('type') == 'message_end':
+                message = event.get('message', {})
+                if message.get('role') == 'assistant':
+                    content = message.get('content', [])
+                    texts = [
+                        c['text'] 
+                        for c in content 
+                        if c.get('type') == 'text' and c.get('text')
+                    ]
+                    return '\n'.join(texts)
+        except json.JSONDecodeError:
+            continue
+    
+    return ""
+
+
+def _log_query(session_dir: Path, entry: Dict[str, Any]) -> None:
+    """Append a query log entry to llm_queries.jsonl.
+    
+    Adds timestamp if not present.
+    """
+    if "timestamp" not in entry:
+        entry["timestamp"] = datetime.now(timezone.utc).isoformat()
+    
+    log_file = session_dir / "llm_queries.jsonl"
+    with log_file.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def _spawn_sub_agent(
+    prompt: str,
+    remaining_depth: int,
+    session_dir: Path,
+    cleanup: bool = True,
+    model: str = DEFAULT_LLM_MODEL,
+    timeout: int = DEFAULT_LLM_TIMEOUT,
+) -> str:
+    """Spawn a full pi subprocess for a sub-query.
+    
+    Args:
+        prompt: The prompt to send to the sub-agent.
+        remaining_depth: Current remaining recursion depth. If 0, fails fast.
+        session_dir: Parent session directory for state management.
+        cleanup: If True, remove sub-session directory after completion.
+        model: Model to use for the sub-agent.
+        timeout: Timeout in seconds for the subprocess.
+    
+    Returns:
+        The text response from the sub-agent, or an error string on failure.
+    """
+    query_id = f"q_{uuid.uuid4().hex[:8]}"
+    start_time = time.time()
+    
+    # Calculate depth level for directory naming
+    # remaining_depth=3 means we're at depth level 0 (root)
+    # remaining_depth=2 means we're at depth level 1, etc.
+    depth_level = remaining_depth
+    
+    # Create sub-session directory
+    sub_session_dir = session_dir / f"depth-{depth_level}" / query_id
+    sub_session_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Check depth limit BEFORE spawning
+    if remaining_depth <= 0:
+        error_msg = "[ERROR: Recursion depth limit reached. Process without sub-queries.]"
+        _log_query(session_dir, {
+            "query_id": query_id,
+            "depth_level": depth_level,
+            "remaining_depth": remaining_depth,
+            "prompt_preview": prompt[:200] if prompt else "",
+            "prompt_chars": len(prompt),
+            "sub_state_dir": str(sub_session_dir),
+            "response_preview": error_msg[:200],
+            "response_chars": len(error_msg),
+            "duration_ms": int((time.time() - start_time) * 1000),
+            "status": "depth_exceeded",
+            "cleanup": cleanup,
+        })
+        if cleanup and sub_session_dir.exists():
+            shutil.rmtree(sub_session_dir, ignore_errors=True)
+        return error_msg
+    
+    # Write prompt to file
+    prompt_file = sub_session_dir / "prompt.txt"
+    prompt_file.write_text(prompt, encoding="utf-8")
+    
+    # Build pi command
+    # Inject RLM_STATE_DIR and RLM_REMAINING_DEPTH via --append-system-prompt
+    system_append = f"RLM_STATE_DIR={sub_session_dir} RLM_REMAINING_DEPTH={remaining_depth - 1}"
+    
+    cmd = [
+        "pi",
+        "--mode", "json",
+        "-p",  # Prompt mode (non-interactive)
+        "--no-session",
+        "--model", model,
+        "--append-system-prompt", system_append,
+    ]
+    
+    response = ""
+    status = "success"
+    
+    try:
+        with prompt_file.open("r", encoding="utf-8") as f:
+            result = subprocess.run(
+                cmd,
+                stdin=f,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        
+        if result.returncode != 0:
+            stderr_preview = result.stderr[:500] if result.stderr else "Unknown error"
+            response = f"[ERROR: Sub-agent failed with exit code {result.returncode}: {stderr_preview}]"
+            status = "failed"
+        else:
+            response = _parse_pi_json_output(result.stdout)
+            if not response:
+                response = "[ERROR: Failed to parse sub-agent response]"
+                status = "parse_error"
+    
+    except subprocess.TimeoutExpired:
+        response = f"[ERROR: Sub-agent timed out after {timeout}s]"
+        status = "timeout"
+    except Exception as e:
+        response = f"[ERROR: Sub-agent exception: {str(e)[:200]}]"
+        status = "exception"
+    
+    duration_ms = int((time.time() - start_time) * 1000)
+    
+    # Log the query
+    _log_query(session_dir, {
+        "query_id": query_id,
+        "depth_level": depth_level,
+        "remaining_depth": remaining_depth,
+        "prompt_preview": prompt[:200] if prompt else "",
+        "prompt_chars": len(prompt),
+        "sub_state_dir": str(sub_session_dir),
+        "response_preview": response[:200] if response else "",
+        "response_chars": len(response),
+        "duration_ms": duration_ms,
+        "status": status,
+        "cleanup": cleanup,
+    })
+    
+    # Cleanup sub-session directory if requested and successful
+    if cleanup and sub_session_dir.exists():
+        shutil.rmtree(sub_session_dir, ignore_errors=True)
+        # Also clean up parent depth directory if empty
+        depth_dir = sub_session_dir.parent
+        if depth_dir.exists() and not any(depth_dir.iterdir()):
+            depth_dir.rmdir()
+    
+    return response
+
+
 
 
 def _generate_chunk_hints(chunk_text: str) -> Dict[str, Any]:
@@ -536,6 +746,36 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
     def add_buffer(text: str) -> None:
         buffers_ref.append(str(text))
 
+    # === LLM Query Helpers (Phase 1) ===
+    
+    def llm_query(prompt: str, cleanup: bool = True) -> str:
+        """Send a prompt to a sub-agent and return its response.
+        
+        This is the core RLM primitive for recursive LLM calls within
+        Python code blocks.
+        
+        Args:
+            prompt: The prompt to send to the sub-agent.
+            cleanup: If True (default), remove sub-session state after completion.
+        
+        Returns:
+            The text response from the sub-agent, or an error string on failure.
+        
+        Example:
+            summary = llm_query("Summarize this in 50 words: " + chunk_text)
+        """
+        # Get remaining depth from state, with migration support
+        remaining_depth = state_ref.get("remaining_depth", DEFAULT_MAX_DEPTH)
+        
+        # Use the global semaphore to limit concurrent spawns
+        with _GLOBAL_CONCURRENCY_SEMAPHORE:
+            return _spawn_sub_agent(
+                prompt=prompt,
+                remaining_depth=remaining_depth,
+                session_dir=state_path_ref.parent,
+                cleanup=cleanup,
+            )
+
     return {
         # Content exploration
         "peek": peek,
@@ -553,6 +793,8 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
         "filter_handle": filter_handle,
         "map_field": map_field,
         "sum_field": sum_field,
+        # LLM Query (Phase 1)
+        "llm_query": llm_query,
     }
 
 
@@ -567,7 +809,10 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     content = _read_text_file(ctx_path, max_bytes=args.max_bytes)
     state: Dict[str, Any] = {
-        "version": 2,  # Bumped for handle system
+        "version": 3,  # Phase 1: Added depth tracking
+        "max_depth": DEFAULT_MAX_DEPTH,
+        "remaining_depth": DEFAULT_MAX_DEPTH,
+        "preserve_recursive_state": False,
         "context": {
             "path": str(ctx_path),
             "loaded_at": time.time(),
@@ -577,6 +822,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         "handles": {},
         "handle_counter": 0,
         "globals": {},
+        "final_answer": None,
     }
     _save_state(state, state_path)
 
