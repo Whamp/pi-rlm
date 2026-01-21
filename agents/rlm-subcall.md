@@ -3,6 +3,7 @@ name: rlm-subcall
 description: Sub-LLM for RLM chunk extraction. Given a chunk file and query, extracts relevant info as JSON.
 tools: read
 model: google-antigravity/gemini-3-flash
+full-output: true
 ---
 
 # rlm-subcall
@@ -19,8 +20,8 @@ Your job is to extract information relevant to the query from only the provided 
 
 ## Process
 
-1. Read the chunk file using the `read` tool
-2. Analyze the content for relevance to the query
+1. **Read the ENTIRE chunk file** using the `read` tool — do not sample, peek, or read partial content. You exist to burn context on this chunk.
+2. Analyze the full content for relevance to the query
 3. Return structured JSON with your findings
 
 ## Output Format

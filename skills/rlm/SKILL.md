@@ -43,17 +43,7 @@ If the user didn't supply arguments, ask for:
    python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> status
    ```
 
-2. **Scout the context quickly**
-   ```bash
-   python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec -c "print(peek(0, 3000))"
-   python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec -c "print(peek(len(content)-3000, len(content)))"
-   ```
-
-3. **Choose a chunking strategy**
-   - Prefer semantic chunking if the format is clear (markdown headings, JSON objects, log timestamps).
-   - Otherwise, chunk by characters (size around chunk_chars, optional overlap).
-
-4. **Materialize chunks as files** (so subagents can read them)
+2. **Materialize chunks as files** (so subagents can read them)
    ```bash
    python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec <<'PY'
    session_dir = state_path.parent  # available in env
@@ -70,30 +60,28 @@ If the user didn't supply arguments, ask for:
    ```
    The manifest contains start/end character and line positions for each chunk.
 
-5. **Subcall loop** (delegate to rlm-subcall)
-   For each chunk file, invoke the rlm-subcall subagent:
+3. **Subcall loop — use parallel mode**
+   
+   **Always use parallel invocation** for speed. The `rlm-subcall` agent has `full-output: true` configured, so parallel mode returns complete results (not truncated previews).
+
    ```json
    {
-     "agent": "rlm-subcall",
-     "task": "Query: <user query>\nChunk file: <absolute path to chunk>"
+     "tasks": [
+       {"agent": "rlm-subcall", "task": "Query: <user query>\nChunk file: <absolute path to chunk_0000.txt>"},
+       {"agent": "rlm-subcall", "task": "Query: <user query>\nChunk file: <absolute path to chunk_0001.txt>"},
+       ...
+     ]
    }
    ```
 
-   Example invocation via subagent tool:
-   ```json
-   {
-     "agent": "rlm-subcall",
-     "task": "Query: What authentication methods are described?\nChunk file: /home/user/project/.pi/rlm_state/auth-spec-20260120-155234/chunks/chunk_0000.txt"
-   }
+   The subagents will read their entire chunk (they exist to burn context) and return structured JSON.
+
+   Optionally accumulate results using `add_buffer()`:
+   ```bash
+   python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec -c "add_buffer('<subagent result>')"
    ```
 
-   - Keep subagent outputs compact and structured (JSON).
-   - Optionally accumulate results using `add_buffer()`:
-     ```bash
-     python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec -c "add_buffer('<subagent result>')"
-     ```
-
-6. **Synthesis**
+4. **Synthesis**
    - Once enough evidence is collected, synthesize the final answer in the main conversation.
    - Use the manifest to cite specific locations (line numbers, character positions).
    - Optionally invoke rlm-subcall once more to merge collected buffers into a coherent draft.

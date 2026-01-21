@@ -17,6 +17,7 @@ export interface AgentConfig {
 	model?: string;
 	thinking?: string; // off | minimal | low | medium | high
 	requiredSkills?: string[];
+	fullOutput?: boolean; // Return full output instead of truncated preview in parallel mode
 	systemPrompt: string;
 	source: "user" | "project";
 	filePath: string;
@@ -103,6 +104,7 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 			model: frontmatter.model,
 			thinking: frontmatter.thinking,
 			requiredSkills: maybeArray(requiredSkills),
+			fullOutput: frontmatter["full-output"] === "true" || frontmatter.fullOutput === "true",
 			systemPrompt: body,
 			source,
 			filePath,

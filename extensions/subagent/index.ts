@@ -142,6 +142,7 @@ interface UsageStats {
 interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
+	fullOutput?: boolean;
 	task: string;
 	exitCode: number;
 	messages: Message[];
@@ -277,6 +278,7 @@ async function runSingleAgent(
 	const currentResult: SingleResult = {
 		agent: agentName,
 		agentSource: agent.source,
+		fullOutput: agent.fullOutput,
 		task,
 		exitCode: 0,
 		messages: [],
@@ -624,8 +626,10 @@ export default function (pi: ExtensionAPI) {
 				const successCount = results.filter((r) => r.exitCode === 0).length;
 				const summaries = results.map((r) => {
 					const output = getFinalOutput(r.messages);
-					const preview = output.slice(0, 100) + (output.length > 100 ? "..." : "");
-					return `[${r.agent}] ${r.exitCode === 0 ? "completed" : "failed"}: ${preview || "(no output)"}`;
+					const displayOutput = r.fullOutput
+						? output
+						: (output.slice(0, 100) + (output.length > 100 ? "..." : ""));
+					return `[${r.agent}] ${r.exitCode === 0 ? "completed" : "failed"}: ${displayOutput || "(no output)"}`;
 				});
 				return {
 					content: [
