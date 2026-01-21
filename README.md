@@ -10,29 +10,21 @@ This extension requires the **subagent extension** for pi, which enables delegat
 
 ### Installing the Subagent Extension
 
-1. Clone or copy the subagent extension to your pi extensions directory:
+The subagent extension is included in this repo under `extensions/subagent/`.
 
 ```bash
-# Option A: From dotfiles repo (if available)
-git clone https://github.com/Whamp/dotfiles.git /tmp/dotfiles
-cp -r /tmp/dotfiles/.pi/agent/extensions/subagent ~/.pi/agent/extensions/
+# Copy or symlink to your pi extensions directory
+cp -r extensions/subagent ~/.pi/agent/extensions/
 
-# Option B: Create manually (see structure below)
-mkdir -p ~/.pi/agent/extensions/subagent
+# Or symlink for easier updates
+ln -s $(pwd)/extensions/subagent ~/.pi/agent/extensions/subagent
 ```
 
-2. The subagent extension structure:
-```
-~/.pi/agent/extensions/subagent/
-├── index.ts        # Main extension entry point
-├── agents.ts       # Agent discovery logic
-├── package.json    # NPM package
-└── README.md       # Documentation
-```
-
-3. Verify it's working by checking if `subagent` appears in pi's available tools.
+Verify it's working by checking if `subagent` appears in pi's available tools.
 
 > **Note:** The subagent extension spawns separate pi processes to handle delegated tasks. Each sub-agent runs in an isolated context, which is essential for the RLM pattern where chunk processing must not pollute the main context.
+>
+> See `extensions/subagent/README.md` for full documentation on the subagent tool.
 
 ## What is RLM?
 
