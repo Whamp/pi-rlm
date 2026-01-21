@@ -4,6 +4,8 @@ An RLM (Recursive Language Model) extension for [pi](https://github.com/mariozec
 
 Based on the RLM pattern from [arXiv:2512.24601](https://arxiv.org/abs/2512.24601).
 
+Originally a fork of this claude code minimal implementation [claude_code_RLM] https://github.com/brainqub3/claude_code_RLM
+
 ## Prerequisites
 
 This extension requires the **subagent extension** for pi, which enables delegating tasks to specialized sub-agents.
