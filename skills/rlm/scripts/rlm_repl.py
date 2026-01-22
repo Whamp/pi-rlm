@@ -205,6 +205,762 @@ def _count_lines_in_range(content: str, start: int, end: int) -> Tuple[int, int]
 
 
 # =============================================================================
+# Semantic Chunking Infrastructure (Phase 4 + Phase 6)
+# =============================================================================
+
+# Codemap detection cache (None = not checked yet, False = unavailable)
+_CODEMAP_CACHE: Optional[Union[str, bool]] = None
+
+
+def _detect_codemap() -> Optional[str]:
+    """Auto-detect codemap availability.
+    
+    Checks in order:
+    1. RLM_CODEMAP_PATH environment variable (explicit path)
+    2. npx codemap (via npx)
+    3. codemap in PATH (system install)
+    
+    Returns:
+        Command string to invoke codemap, or None if unavailable.
+        Example: "/usr/local/bin/codemap" or "npx codemap"
+    """
+    global _CODEMAP_CACHE
+    
+    # Return cached result if available
+    if _CODEMAP_CACHE is not None:
+        return _CODEMAP_CACHE if _CODEMAP_CACHE else None
+    
+    # 1. Check RLM_CODEMAP_PATH env var
+    env_path = os.environ.get('RLM_CODEMAP_PATH', '').strip()
+    if env_path:
+        if Path(env_path).exists():
+            _CODEMAP_CACHE = env_path
+            return env_path
+        # Env var set but path doesn't exist - treat as explicit disable if empty string
+        if env_path == '':
+            _CODEMAP_CACHE = False
+            return None
+    
+    # 2. Try codemap in PATH first (faster than npx)
+    try:
+        result = subprocess.run(
+            ['codemap', '--version'],
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            _CODEMAP_CACHE = 'codemap'
+            return 'codemap'
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    
+    # 3. Try npx codemap
+    try:
+        result = subprocess.run(
+            ['npx', 'codemap', '--version'],
+            capture_output=True,
+            timeout=30,  # npx may need to download
+        )
+        if result.returncode == 0:
+            _CODEMAP_CACHE = 'npx codemap'
+            return 'npx codemap'
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    
+    _CODEMAP_CACHE = False
+    return None
+
+
+def _extract_symbol_boundaries(
+    codemap_output: str,
+    context_path: str,
+) -> List[Dict[str, Any]]:
+    """Parse codemap JSON output to extract symbol boundaries.
+    
+    Args:
+        codemap_output: JSON string from codemap -o json
+        context_path: Path to the source file (for matching)
+    
+    Returns:
+        List of symbol boundary dicts with keys:
+        - name: symbol name
+        - kind: symbol kind (function, class, method, etc.)
+        - signature: full signature if available
+        - start_line: 1-indexed start line
+        - end_line: 1-indexed end line
+        - exported: whether symbol is exported
+    """
+    try:
+        data = json.loads(codemap_output)
+    except json.JSONDecodeError:
+        return []
+    
+    # Handle both array format and object with 'files' key
+    if isinstance(data, list):
+        files = data
+    elif isinstance(data, dict) and 'files' in data:
+        files = data['files']
+    else:
+        return []
+    
+    # Find the file matching our context
+    context_name = Path(context_path).name
+    context_resolved = Path(context_path).resolve() if Path(context_path).exists() else None
+    
+    symbols = []
+    for file_entry in files:
+        file_path = file_entry.get('path', '')
+        
+        # Match by name or resolved path
+        if Path(file_path).name == context_name or \
+           (context_resolved and Path(file_path).resolve() == context_resolved):
+            for sym in file_entry.get('symbols', []):
+                lines = sym.get('lines', [])
+                if len(lines) >= 2:
+                    symbols.append({
+                        'name': sym.get('name', ''),
+                        'kind': sym.get('kind', 'unknown'),
+                        'signature': sym.get('signature', ''),
+                        'start_line': lines[0],
+                        'end_line': lines[1],
+                        'exported': sym.get('exported', False),
+                    })
+            break  # Found our file
+    
+    # Sort by start_line
+    symbols.sort(key=lambda s: s['start_line'])
+    return symbols
+
+
+def _line_to_char_position(content: str, line_num: int) -> int:
+    """Convert 1-indexed line number to character position.
+    
+    Args:
+        content: The file content.
+        line_num: 1-indexed line number.
+    
+    Returns:
+        Character position at the start of that line.
+    """
+    if line_num <= 1:
+        return 0
+    
+    lines = content.split('\n')
+    pos = 0
+    for i in range(min(line_num - 1, len(lines))):
+        pos += len(lines[i]) + 1  # +1 for newline
+    return pos
+
+
+def _chunk_code(
+    content: str,
+    context_path: str,
+    target_size: int,
+    min_size: int,
+    max_size: int,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Split code content at function/class boundaries using codemap.
+    
+    Uses tree-sitter (via codemap) to identify symbol boundaries and
+    splits code at natural function/class/method boundaries.
+    
+    Args:
+        content: Source code content to chunk.
+        context_path: Path to the source file (for codemap).
+        target_size: Target chunk size in characters.
+        min_size: Minimum chunk size.
+        max_size: Maximum chunk size.
+    
+    Returns:
+        Tuple of (chunk_metas, codemap_used) where:
+        - chunk_metas: List of chunk metadata dicts
+        - codemap_used: True if codemap was used, False if fell back to text
+    """
+    codemap_cmd = _detect_codemap()
+    
+    if not codemap_cmd:
+        # Fall back to text chunking
+        return _chunk_text(content, target_size, min_size, max_size), False
+    
+    # Resolve the context path for codemap
+    context_resolved = Path(context_path).resolve()
+    if not context_resolved.exists():
+        return _chunk_text(content, target_size, min_size, max_size), False
+    
+    # Run codemap to get symbol boundaries
+    try:
+        # Build command
+        cmd_parts = codemap_cmd.split()
+        cmd = cmd_parts + ['-o', 'json', str(context_resolved)]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=context_resolved.parent,  # Run from file's directory
+        )
+        
+        if result.returncode != 0:
+            # Codemap failed - fall back to text chunking
+            return _chunk_text(content, target_size, min_size, max_size), False
+        
+        symbols = _extract_symbol_boundaries(result.stdout, str(context_resolved))
+        
+        if not symbols:
+            # No symbols found - fall back to text chunking
+            return _chunk_text(content, target_size, min_size, max_size), False
+        
+    except (subprocess.TimeoutExpired, OSError, Exception):
+        return _chunk_text(content, target_size, min_size, max_size), False
+    
+    # Build chunks from symbol boundaries
+    # Strategy: Group symbols together until reaching target_size
+    # Split at symbol boundaries to avoid breaking mid-function
+    
+    chunks = []
+    current_chunk = {
+        'start': 0,
+        'end': 0,
+        'split_reason': 'start',
+        'boundaries': [],
+    }
+    
+    # Convert line numbers to character positions for each symbol
+    symbol_positions = []
+    for sym in symbols:
+        start_pos = _line_to_char_position(content, sym['start_line'])
+        end_pos = _line_to_char_position(content, sym['end_line'] + 1)
+        end_pos = min(end_pos, len(content))
+        symbol_positions.append({
+            **sym,
+            'start_char': start_pos,
+            'end_char': end_pos,
+        })
+    
+    # Handle content before first symbol (imports, comments, etc.)
+    if symbol_positions and symbol_positions[0]['start_char'] > 0:
+        preamble_end = symbol_positions[0]['start_char']
+        current_chunk['end'] = preamble_end
+    
+    for i, sym in enumerate(symbol_positions):
+        sym_size = sym['end_char'] - sym['start_char']
+        current_size = current_chunk['end'] - current_chunk['start']
+        
+        # If this is the first symbol and we have no content yet, start here
+        if current_chunk['end'] == 0:
+            current_chunk['end'] = sym['end_char']
+            current_chunk['boundaries'].append({
+                'type': sym['kind'],
+                'name': sym['name'],
+                'signature': sym['signature'],
+                'line': sym['start_line'],
+            })
+            continue
+        
+        combined_size = current_size + sym_size
+        
+        # Decide whether to extend current chunk or start new one
+        should_split = False
+        split_reason = None
+        
+        if combined_size > max_size:
+            # Hard limit - must split
+            should_split = True
+            split_reason = 'max_size'
+        elif current_size >= target_size and sym['kind'] in ('function', 'class', 'method', 'impl'):
+            # At target and hit a good boundary
+            should_split = True
+            split_reason = f"symbol_{sym['kind']}"
+        elif current_size >= target_size * 1.2:
+            # Well past target
+            should_split = True
+            split_reason = 'target_size'
+        
+        if should_split:
+            # Finalize current chunk
+            chunks.append(current_chunk)
+            
+            # Start new chunk at this symbol
+            current_chunk = {
+                'start': sym['start_char'],
+                'end': sym['end_char'],
+                'split_reason': split_reason,
+                'boundaries': [{
+                    'type': sym['kind'],
+                    'name': sym['name'],
+                    'signature': sym['signature'],
+                    'line': sym['start_line'],
+                }],
+            }
+        else:
+            # Extend current chunk
+            current_chunk['end'] = sym['end_char']
+            current_chunk['boundaries'].append({
+                'type': sym['kind'],
+                'name': sym['name'],
+                'signature': sym['signature'],
+                'line': sym['start_line'],
+            })
+    
+    # Handle content after last symbol
+    if symbol_positions:
+        last_sym_end = symbol_positions[-1]['end_char']
+        if last_sym_end < len(content):
+            current_chunk['end'] = len(content)
+    else:
+        current_chunk['end'] = len(content)
+    
+    # Add final chunk
+    if current_chunk['end'] > current_chunk['start']:
+        chunks.append(current_chunk)
+    
+    # Merge tiny trailing chunk if under min_size
+    if len(chunks) > 1:
+        last_chunk = chunks[-1]
+        last_size = last_chunk['end'] - last_chunk['start']
+        if last_size < min_size:
+            prev_chunk = chunks[-2]
+            prev_size = prev_chunk['end'] - prev_chunk['start']
+            if prev_size + last_size <= max_size:
+                # Merge last into previous
+                prev_chunk['end'] = last_chunk['end']
+                prev_chunk['boundaries'].extend(last_chunk['boundaries'])
+                chunks.pop()
+    
+    # If chunking produced no valid chunks, fall back
+    if not chunks:
+        return _chunk_text(content, target_size, min_size, max_size), False
+    
+    return chunks, True
+
+
+# File extensions mapped to format types
+_CODE_EXTENSIONS = frozenset({
+    '.py', '.pyi', '.pyw',  # Python
+    '.js', '.jsx', '.mjs', '.cjs',  # JavaScript
+    '.ts', '.tsx', '.mts', '.cts',  # TypeScript
+    '.rs',  # Rust
+    '.go',  # Go
+    '.java',  # Java
+    '.c', '.h', '.cc', '.cpp', '.cxx', '.hpp', '.hxx',  # C/C++
+    '.cs',  # C#
+    '.rb',  # Ruby
+    '.php',  # PHP
+    '.swift',  # Swift
+    '.kt', '.kts',  # Kotlin
+    '.scala',  # Scala
+    '.lua',  # Lua
+    '.sh', '.bash', '.zsh',  # Shell
+    '.pl', '.pm',  # Perl
+    '.r', '.R',  # R
+    '.sql',  # SQL
+})
+
+_MARKDOWN_EXTENSIONS = frozenset({'.md', '.markdown', '.mdx', '.mdown', '.mkd'})
+
+
+def _detect_format(content: str, context_path: str) -> str:
+    """Detect content format from extension or content analysis.
+    
+    Args:
+        content: The file content.
+        context_path: Path to the context file for extension detection.
+    
+    Returns:
+        One of: 'markdown', 'code', 'json', 'text'
+    """
+    ext = Path(context_path).suffix.lower()
+    
+    if ext in _MARKDOWN_EXTENSIONS:
+        return 'markdown'
+    if ext in _CODE_EXTENSIONS:
+        return 'code'
+    if ext == '.json':
+        return 'json'
+    if ext in {'.txt', '.text', '.log'}:
+        return 'text'
+    
+    # Content-based fallback: check for markdown header density
+    # Count ## or # headers in the content
+    header_matches = re.findall(r'^#{1,6}\s+\S', content, re.MULTILINE)
+    if len(header_matches) > 5:
+        return 'markdown'
+    
+    return 'text'
+
+
+def _find_header_boundaries(content: str) -> List[Tuple[int, int, int, str]]:
+    """Find all markdown header positions in content.
+    
+    Returns:
+        List of (start_pos, end_pos, level, header_text) tuples.
+        start_pos is position of '#', end_pos is end of header line.
+    """
+    boundaries = []
+    for match in re.finditer(r'^(#{1,6})\s+(.+?)$', content, re.MULTILINE):
+        level = len(match.group(1))
+        header_text = match.group(2).strip()
+        boundaries.append((match.start(), match.end(), level, header_text))
+    return boundaries
+
+
+def _chunk_markdown(
+    content: str,
+    target_size: int,
+    min_size: int,
+    max_size: int,
+) -> List[Dict[str, Any]]:
+    """Split markdown content at header boundaries.
+    
+    Strategy:
+    - Prefer splitting at h2 (##) or h3 (###) boundaries
+    - Keep sections together until reaching target_size
+    - Force split if max_size would be exceeded
+    - Merge small trailing sections if under min_size
+    
+    Args:
+        content: Markdown content to chunk.
+        target_size: Target chunk size in characters (soft limit).
+        min_size: Minimum chunk size (avoids tiny chunks).
+        max_size: Maximum chunk size (hard limit).
+    
+    Returns:
+        List of chunk metadata dicts with keys:
+        - start: start character position
+        - end: end character position
+        - split_reason: why split occurred here
+        - boundaries: list of headers in this chunk
+    """
+    headers = _find_header_boundaries(content)
+    
+    if not headers:
+        # No headers - fall back to text chunking
+        return _chunk_text(content, target_size, min_size, max_size)
+    
+    # Build list of section boundaries (each header starts a new section)
+    # Sections run from one header to the next (or end of content)
+    sections = []
+    for i, (start, end, level, text) in enumerate(headers):
+        next_start = headers[i + 1][0] if i + 1 < len(headers) else len(content)
+        sections.append({
+            'start': start,
+            'end': next_start,
+            'level': level,
+            'header_text': text,
+            'header_line': content[:start].count('\n') + 1,
+        })
+    
+    # Handle content before first header (preamble)
+    if headers[0][0] > 0:
+        sections.insert(0, {
+            'start': 0,
+            'end': headers[0][0],
+            'level': 0,
+            'header_text': '(preamble)',
+            'header_line': 1,
+        })
+    
+    # Combine sections into chunks
+    chunks = []
+    current_chunk = {
+        'start': sections[0]['start'],
+        'end': sections[0]['end'],
+        'split_reason': 'start',
+        'boundaries': [],
+    }
+    
+    if sections[0]['level'] > 0:
+        current_chunk['boundaries'].append({
+            'type': 'heading',
+            'level': sections[0]['level'],
+            'text': sections[0]['header_text'],
+            'line': sections[0]['header_line'],
+        })
+    
+    for section in sections[1:]:
+        section_size = section['end'] - section['start']
+        current_size = current_chunk['end'] - current_chunk['start']
+        combined_size = current_size + section_size
+        
+        # Decide whether to extend current chunk or start new one
+        should_split = False
+        split_reason = None
+        
+        if combined_size > max_size:
+            # Hard limit - must split
+            should_split = True
+            split_reason = 'max_size'
+        elif current_size >= target_size and section['level'] <= 3:
+            # At target and hit a good boundary (h1, h2, h3)
+            should_split = True
+            split_reason = f"header_level_{section['level']}"
+        elif current_size >= target_size and combined_size > target_size * 1.5:
+            # Well past target and adding this would go way over
+            should_split = True
+            split_reason = 'target_size'
+        
+        if should_split:
+            # Finalize current chunk
+            chunks.append(current_chunk)
+            
+            # Start new chunk
+            current_chunk = {
+                'start': section['start'],
+                'end': section['end'],
+                'split_reason': split_reason,
+                'boundaries': [],
+            }
+        else:
+            # Extend current chunk
+            current_chunk['end'] = section['end']
+        
+        # Record header boundary in current chunk
+        if section['level'] > 0:
+            current_chunk['boundaries'].append({
+                'type': 'heading',
+                'level': section['level'],
+                'text': section['header_text'],
+                'line': section['header_line'],
+            })
+    
+    # Add final chunk
+    chunks.append(current_chunk)
+    
+    # Merge tiny trailing chunk if under min_size
+    if len(chunks) > 1:
+        last_chunk = chunks[-1]
+        last_size = last_chunk['end'] - last_chunk['start']
+        if last_size < min_size:
+            prev_chunk = chunks[-2]
+            prev_size = prev_chunk['end'] - prev_chunk['start']
+            if prev_size + last_size <= max_size:
+                # Merge last into previous
+                prev_chunk['end'] = last_chunk['end']
+                prev_chunk['boundaries'].extend(last_chunk['boundaries'])
+                chunks.pop()
+    
+    # Post-process: split any chunk that exceeds max_size using text chunking
+    final_chunks = []
+    for chunk in chunks:
+        chunk_size = chunk['end'] - chunk['start']
+        if chunk_size > max_size:
+            # This section is too big - split it using text chunking
+            chunk_content = content[chunk['start']:chunk['end']]
+            sub_chunks = _chunk_text(chunk_content, target_size, min_size, max_size)
+            for i, sub in enumerate(sub_chunks):
+                final_chunks.append({
+                    'start': chunk['start'] + sub['start'],
+                    'end': chunk['start'] + sub['end'],
+                    'split_reason': 'oversized_section' if i > 0 else chunk['split_reason'],
+                    'boundaries': chunk['boundaries'] if i == 0 else [],
+                })
+        else:
+            final_chunks.append(chunk)
+    
+    return final_chunks
+
+
+def _chunk_text(
+    content: str,
+    target_size: int,
+    min_size: int,
+    max_size: int,
+) -> List[Dict[str, Any]]:
+    """Split plain text content at paragraph boundaries.
+    
+    Strategy:
+    - Prefer splitting at double-newline (paragraph break)
+    - Fall back to single newline if no paragraphs
+    - Fall back to space if no newlines
+    - Hard split if no breaks found within max_size
+    
+    Args:
+        content: Text content to chunk.
+        target_size: Target chunk size in characters.
+        min_size: Minimum chunk size.
+        max_size: Maximum chunk size (hard limit).
+    
+    Returns:
+        List of chunk metadata dicts with keys:
+        - start: start character position
+        - end: end character position
+        - split_reason: why split occurred here
+        - boundaries: always empty for text chunks
+    """
+    if len(content) <= max_size:
+        return [{
+            'start': 0,
+            'end': len(content),
+            'split_reason': 'single_chunk',
+            'boundaries': [],
+        }]
+    
+    chunks = []
+    pos = 0
+    
+    while pos < len(content):
+        remaining = len(content) - pos
+        
+        if remaining <= max_size:
+            # Last chunk - take it all
+            chunks.append({
+                'start': pos,
+                'end': len(content),
+                'split_reason': 'end' if chunks else 'single_chunk',
+                'boundaries': [],
+            })
+            break
+        
+        # Look for a good break point between target_size and max_size
+        search_start = pos + min(target_size, remaining)
+        search_end = pos + min(max_size, remaining)
+        search_region = content[search_start:search_end]
+        
+        split_pos = None
+        split_reason = None
+        
+        # Try paragraph break (double newline)
+        para_match = re.search(r'\n\n+', search_region)
+        if para_match:
+            split_pos = search_start + para_match.end()
+            split_reason = 'paragraph'
+        else:
+            # Try line break
+            line_match = re.search(r'\n', search_region)
+            if line_match:
+                split_pos = search_start + line_match.end()
+                split_reason = 'line'
+            else:
+                # Try space
+                space_match = re.search(r'\s', search_region)
+                if space_match:
+                    split_pos = search_start + space_match.end()
+                    split_reason = 'word'
+                else:
+                    # Hard split at max_size
+                    split_pos = pos + max_size
+                    split_reason = 'hard_split'
+        
+        chunks.append({
+            'start': pos,
+            'end': split_pos,
+            'split_reason': 'start' if not chunks else split_reason,
+            'boundaries': [],
+        })
+        pos = split_pos
+    
+    return chunks
+
+
+def _smart_chunk_impl(
+    content: str,
+    context_path: str,
+    out_dir: Path,
+    target_size: int = 200_000,
+    min_size: int = 50_000,
+    max_size: int = 400_000,
+    encoding: str = "utf-8",
+) -> Tuple[List[str], Dict[str, Any]]:
+    """Core implementation of smart_chunk for testing.
+    
+    Args:
+        content: Content to chunk.
+        context_path: Original file path (for format detection).
+        out_dir: Output directory for chunks.
+        target_size: Target chars per chunk.
+        min_size: Minimum chunk size.
+        max_size: Maximum chunk size (hard limit).
+        encoding: File encoding for output.
+    
+    Returns:
+        Tuple of (chunk_file_paths, manifest_dict).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Detect format
+    format_type = _detect_format(content, context_path)
+    
+    # Choose chunking strategy
+    # Phase 6: Track whether codemap was used for manifest
+    codemap_used = False
+    
+    if format_type == 'markdown':
+        chunk_metas = _chunk_markdown(content, target_size, min_size, max_size)
+        chunking_method = 'smart_markdown'
+    elif format_type == 'code':
+        # Phase 6: Use codemap for code chunking when available
+        chunk_metas, codemap_used = _chunk_code(
+            content, context_path, target_size, min_size, max_size
+        )
+        chunking_method = 'smart_code' if codemap_used else 'smart_text'
+    else:
+        # For json, text - use text chunking
+        chunk_metas = _chunk_text(content, target_size, min_size, max_size)
+        chunking_method = 'smart_text'
+    
+    # Write chunks and build manifest
+    paths = []
+    manifest_chunks = []
+    
+    for i, meta in enumerate(chunk_metas):
+        chunk_id = f"chunk_{i:04d}"
+        chunk_file = f"{chunk_id}.txt"
+        chunk_path = out_dir / chunk_file
+        
+        chunk_text = content[meta['start']:meta['end']]
+        chunk_path.write_text(chunk_text, encoding=encoding)
+        paths.append(str(chunk_path))
+        
+        start_line, end_line = _count_lines_in_range(content, meta['start'], meta['end'])
+        
+        chunk_entry = {
+            'id': chunk_id,
+            'file': chunk_file,
+            'start_char': meta['start'],
+            'end_char': meta['end'],
+            'start_line': start_line,
+            'end_line': end_line,
+            'split_reason': meta['split_reason'],
+            'format': format_type,
+        }
+        
+        # Add boundaries if present
+        if meta.get('boundaries'):
+            chunk_entry['boundaries'] = meta['boundaries']
+        
+        # Add preview and hints
+        chunk_entry['preview'] = _generate_chunk_preview(chunk_text)
+        hints = _generate_chunk_hints(chunk_text)
+        if hints:
+            chunk_entry['hints'] = hints
+        
+        manifest_chunks.append(chunk_entry)
+    
+    # Build manifest
+    manifest = {
+        'context_file': context_path,
+        'format': format_type,
+        'chunking_method': chunking_method,
+        'codemap_available': _detect_codemap() is not None,
+        'codemap_used': codemap_used,
+        'target_size': target_size,
+        'min_size': min_size,
+        'max_size': max_size,
+        'total_chars': len(content),
+        'total_lines': content.count('\n') + 1,
+        'chunk_count': len(manifest_chunks),
+        'chunks': manifest_chunks,
+    }
+    
+    # Write manifest
+    manifest_path = out_dir / 'manifest.json'
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding=encoding)
+    
+    return paths, manifest
+
+
+# =============================================================================
 # LLM Query Infrastructure (Phase 1)
 # =============================================================================
 
@@ -380,6 +1136,102 @@ def _spawn_sub_agent(
     return response
 
 
+
+
+def _llm_query_batch_impl(
+    prompts: List[str],
+    remaining_depth: int,
+    session_dir: Path,
+    cleanup: bool = True,
+    concurrency: int = 5,
+    max_retries: int = 3,
+) -> Tuple[List[str], Dict[int, Dict[str, Any]]]:
+    """Core implementation of batch LLM queries.
+    
+    This is the module-level implementation used by llm_query_batch() in the
+    REPL environment. It can be tested directly with mocks.
+    
+    Args:
+        prompts: List of prompts to send to sub-agents.
+        remaining_depth: Current remaining recursion depth.
+        session_dir: Parent session directory for state management.
+        cleanup: If True (default), remove sub-session state after completion.
+        concurrency: Max concurrent queries (capped at 5 by global limit).
+        max_retries: Number of retry attempts for failed queries.
+    
+    Returns:
+        Tuple of (results, failures) - see llm_query_batch docstring.
+    """
+    # Generate batch ID for logging
+    batch_id = f"batch_{uuid.uuid4().hex[:8]}"
+    batch_size = len(prompts)
+    
+    # Cap concurrency at global limit (5)
+    effective_concurrency = min(concurrency, 5)
+    
+    # Results placeholder - maintains order
+    results: List[Optional[str]] = [None] * batch_size
+    failures: Dict[int, Dict[str, Any]] = {}
+    
+    def execute_with_retry(index: int, prompt: str) -> Tuple[int, str, Optional[Dict]]:
+        """Execute a single query with retry logic."""
+        last_error = ""
+        
+        for attempt in range(1, max_retries + 1):
+            # Exponential backoff: 1s, 2s, 4s (only after first attempt)
+            if attempt > 1:
+                backoff = 2 ** (attempt - 2)  # 1, 2, 4 for attempts 2, 3, 4
+                time.sleep(backoff)
+            
+            # Use global semaphore for actual spawn
+            with _GLOBAL_CONCURRENCY_SEMAPHORE:
+                response = _spawn_sub_agent(
+                    prompt=prompt,
+                    remaining_depth=remaining_depth,
+                    session_dir=session_dir,
+                    cleanup=cleanup,
+                )
+            
+            # Log with batch info
+            _log_query(session_dir, {
+                "batch_id": batch_id,
+                "batch_index": index,
+                "batch_size": batch_size,
+                "attempt": attempt,
+                "prompt_preview": prompt[:200] if prompt else "",
+                "response_preview": response[:200] if response else "",
+                "status": "error" if response.startswith("[ERROR:") else "success",
+            })
+            
+            # Check if successful (not an error response)
+            if not response.startswith("[ERROR:"):
+                return (index, response, None)
+            
+            last_error = response
+        
+        # All retries exhausted
+        failure_info = {
+            "reason": "max_retries_exhausted",
+            "attempts": max_retries,
+            "error": last_error,
+        }
+        return (index, last_error, failure_info)
+    
+    # Execute in parallel using ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
+        futures = [
+            executor.submit(execute_with_retry, i, prompt)
+            for i, prompt in enumerate(prompts)
+        ]
+        
+        for future in as_completed(futures):
+            index, response, failure_info = future.result()
+            results[index] = response
+            if failure_info is not None:
+                failures[index] = failure_info
+    
+    # Convert Optional list to str list (all should be filled)
+    return ([r if r is not None else "[ERROR: Unexpected None result]" for r in results], failures)
 
 
 def _generate_chunk_hints(chunk_text: str) -> Dict[str, Any]:
@@ -743,6 +1595,57 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
         
         return paths
 
+    # === Semantic Chunking Helper (Phase 4) ===
+
+    def smart_chunk(
+        out_dir: str | os.PathLike,
+        target_size: int = 200_000,
+        min_size: int = 50_000,
+        max_size: int = 400_000,
+        encoding: str = "utf-8",
+    ) -> List[str]:
+        """Smart content-aware chunking.
+        
+        Unlike write_chunks() which splits at fixed byte/char boundaries,
+        smart_chunk() analyzes content structure and splits at natural
+        boundaries:
+        
+        - **Markdown**: Splits at header boundaries (## and ###)
+        - **Text**: Splits at paragraph breaks (double newlines)
+        - **Code**: Falls back to paragraph-based splitting (tree-sitter planned)
+        - **JSON**: Falls back to paragraph-based splitting
+        
+        Args:
+            out_dir: Output directory for chunks.
+            target_size: Target chars per chunk (soft limit, default: 200,000).
+            min_size: Minimum chunk size to avoid tiny chunks (default: 50,000).
+            max_size: Maximum chunk size hard limit (default: 400,000).
+            encoding: File encoding for output files.
+        
+        Returns:
+            List of chunk file paths.
+        
+        Example:
+            paths = smart_chunk(str(session_dir / 'chunks'), target_size=100000)
+            for path in paths:
+                chunk_text = Path(path).read_text()
+                # Process chunk...
+        """
+        content = context_ref.get("content", "")
+        context_path = context_ref.get("path", "unknown")
+        
+        paths, manifest = _smart_chunk_impl(
+            content=content,
+            context_path=context_path,
+            out_dir=Path(out_dir),
+            target_size=target_size,
+            min_size=min_size,
+            max_size=max_size,
+            encoding=encoding,
+        )
+        
+        return paths
+
     def add_buffer(text: str) -> None:
         buffers_ref.append(str(text))
 
@@ -783,6 +1686,120 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
                 cleanup=effective_cleanup,
             )
 
+    # === Batch LLM Query (Phase 3) ===
+    
+    def llm_query_batch(
+        prompts: List[str],
+        concurrency: int = 5,
+        max_retries: int = 3,
+        cleanup: bool = True,
+    ) -> Tuple[List[str], Dict[int, Dict[str, Any]]]:
+        """Execute multiple queries concurrently with retry support.
+        
+        This is the batch variant of llm_query() for parallel sub-LLM invocation.
+        It respects the global concurrency limit (5) regardless of the requested
+        concurrency, and retries failed queries with exponential backoff.
+        
+        Args:
+            prompts: List of prompts to send to sub-agents.
+            concurrency: Max concurrent queries (capped at 5 by global limit).
+            max_retries: Number of retry attempts for failed queries (default: 3).
+            cleanup: If True (default), remove sub-session state after completion.
+        
+        Returns:
+            Tuple of (results, failures) where:
+            - results: List of response strings in same order as input prompts.
+                       Failed items contain "[ERROR: ...]" strings.
+            - failures: Dict mapping failed indices to failure details:
+                       {index: {"reason": str, "attempts": int, "error": str}}
+        
+        Example:
+            prompts = [f"Summarize chunk {i}" for i in range(10)]
+            results, failures = llm_query_batch(prompts, concurrency=5)
+            for i, result in enumerate(results):
+                if i not in failures:
+                    print(f"Chunk {i}: {result[:100]}...")
+        """
+        # Get state info for spawning
+        remaining_depth = state_ref.get("remaining_depth", DEFAULT_MAX_DEPTH)
+        preserve_recursive_state = state_ref.get("preserve_recursive_state", False)
+        effective_cleanup = cleanup and not preserve_recursive_state
+        session_dir = state_path_ref.parent
+        
+        # Delegate to module-level implementation
+        return _llm_query_batch_impl(
+            prompts=prompts,
+            remaining_depth=remaining_depth,
+            session_dir=session_dir,
+            cleanup=effective_cleanup,
+            concurrency=concurrency,
+            max_retries=max_retries,
+        )
+
+    # === Finalization Signal (Phase 5) ===
+
+    def set_final_answer(value: Any) -> None:
+        """Mark a value as the final answer for external retrieval.
+        
+        The final answer is persisted in state and can be retrieved via
+        the `get-final-answer` CLI command. This enables the main agent
+        to retrieve results from recursive sub-agent workflows.
+        
+        Args:
+            value: Any JSON-serializable value (dict, list, str, int, float, bool, None).
+                  Non-serializable values will raise ValueError.
+        
+        Raises:
+            ValueError: If value is not JSON-serializable.
+        
+        Example:
+            # Set a simple result
+            set_final_answer({"summary": "Done", "count": 42})
+            
+            # Retrieve via CLI:
+            # python rlm_repl.py --state ... get-final-answer
+        """
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Final answer must be JSON-serializable: {e}")
+        
+        state_ref["final_answer"] = {
+            "set_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "value": value,
+        }
+        value_type = type(value).__name__
+        if isinstance(value, (list, dict, str)):
+            print(f"Final answer set (type: {value_type}, length: {len(value)})")
+        else:
+            print(f"Final answer set (type: {value_type})")
+
+    def has_final_answer() -> bool:
+        """Check if a final answer has been set.
+        
+        Returns:
+            True if set_final_answer() has been called, False otherwise.
+        
+        Example:
+            if not has_final_answer():
+                set_final_answer(compute_result())
+        """
+        return state_ref.get("final_answer") is not None
+
+    def get_final_answer() -> Any:
+        """Retrieve the final answer value.
+        
+        Returns:
+            The value passed to set_final_answer(), or None if not set.
+        
+        Example:
+            answer = get_final_answer()
+            if answer is not None:
+                process(answer)
+        """
+        fa = state_ref.get("final_answer")
+        return fa["value"] if fa else None
+
     return {
         # Content exploration
         "peek": peek,
@@ -790,6 +1807,7 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
         "grep_raw": grep_raw,
         "chunk_indices": chunk_indices,
         "write_chunks": write_chunks,
+        "smart_chunk": smart_chunk,  # Phase 4: Semantic chunking
         "add_buffer": add_buffer,
         # Handle system
         "handles": handles,
@@ -802,6 +1820,12 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
         "sum_field": sum_field,
         # LLM Query (Phase 1)
         "llm_query": llm_query,
+        # Batch LLM Query (Phase 3)
+        "llm_query_batch": llm_query_batch,
+        # Finalization Signal (Phase 5)
+        "set_final_answer": set_final_answer,
+        "has_final_answer": has_final_answer,
+        "get_final_answer": get_final_answer,
     }
 
 
@@ -859,6 +1883,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     max_depth = state.get("max_depth", DEFAULT_MAX_DEPTH)
     remaining_depth = state.get("remaining_depth", DEFAULT_MAX_DEPTH)
     preserve_recursive_state = state.get("preserve_recursive_state", False)
+    
+    # Phase 5: Include final answer info in status
+    final_answer = state.get("final_answer")
 
     print("RLM REPL status")
     print(f"  State file: {args.state}")
@@ -869,6 +1896,18 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  Remaining depth: {remaining_depth}")
     if preserve_recursive_state:
         print("  Preserve recursive state: enabled")
+    
+    # Phase 5: Display final answer status
+    if final_answer is not None:
+        value = final_answer.get("value")
+        value_type = type(value).__name__
+        if isinstance(value, (list, dict, str)):
+            print(f"  Final answer: SET (type: {value_type}, length: {len(value)})")
+        else:
+            print(f"  Final answer: SET (type: {value_type})")
+    else:
+        print("  Final answer: NOT SET")
+    
     print(f"  Buffers: {len(buffers)}")
     print(f"  Handles: {len(handles)}")
     print(f"  Persisted vars: {len(g)}")
@@ -989,6 +2028,32 @@ def cmd_exec(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_get_final_answer(args: argparse.Namespace) -> int:
+    """CLI command to retrieve the final answer as JSON.
+    
+    Outputs a JSON object with:
+    - "set": boolean indicating if answer is set
+    - "value": the answer value (if set)
+    - "set_at": ISO timestamp when set (if set)
+    """
+    state_path = Path(args.state)
+    state = _load_state(state_path)
+    
+    final_answer = state.get("final_answer")
+    
+    if final_answer is None:
+        result = {"set": False, "value": None, "set_at": None}
+    else:
+        result = {
+            "set": True,
+            "value": final_answer.get("value"),
+            "set_at": final_answer.get("set_at"),
+        }
+    
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="rlm_repl",
@@ -1073,6 +2138,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Warn on stderr when variables could not be persisted",
     )
     p_exec.set_defaults(func=cmd_exec)
+
+    # Phase 5: get-final-answer command
+    p_final = sub.add_parser(
+        "get-final-answer",
+        help="Retrieve the final answer as JSON (for external retrieval)",
+    )
+    p_final.set_defaults(func=cmd_get_final_answer)
 
     return p
 

@@ -51,8 +51,8 @@ skills/rlm/tests/
 ├── test_phase1_llm_query.py # Unit + integration tests for Phase 1
 ├── test_phase2_depth.py     # Depth tracking tests
 ├── test_phase3_batch.py     # Batch execution tests
-├── test_phase4_finalize.py  # Finalization signal tests
-├── test_phase5_markdown.py  # Markdown chunking tests
+├── test_phase4_semantic.py  # Semantic chunking (markdown/text) tests
+├── test_phase5_finalize.py  # Finalization signal tests
 ├── test_phase6_code.py      # Code chunking tests
 ├── test_phase7_json.py      # JSON chunking tests
 └── test_integration.py      # End-to-end workflow tests
@@ -128,7 +128,8 @@ Address these gaps between the paper's RLM design and current pi-rlm implementat
 
 ---
 
-## Phase 1: Core `llm_query()` Infrastructure
+## Phase 1: Core `llm_query()` Infrastructure ✅
+**Status:** COMPLETED
 **Estimated tokens:** ~100k-110k
 
 ### Deliverables
@@ -437,7 +438,8 @@ print(f"Inline query test: {'PASS' if test_passed else 'FAIL'}")
 
 ---
 
-## Phase 2: Depth Tracking & Recursive State
+## Phase 2: Depth Tracking & Recursive State ✅
+**Status:** COMPLETED
 **Estimated tokens:** ~80k-100k
 
 ### Deliverables
@@ -587,7 +589,8 @@ class TestGoalRecursiveDepth:
 
 ---
 
-## Phase 3: `llm_query_batch()` Implementation
+## Phase 3: `llm_query_batch()` Implementation ✅
+**Status:** COMPLETED
 **Estimated tokens:** ~80k-100k
 
 ### Deliverables
@@ -783,187 +786,8 @@ class TestGoalParallelExecution:
 
 ---
 
-## Phase 4: Finalization Signal
-**Estimated tokens:** ~60k-80k
-
-### Deliverables
-1. **`set_final_answer(value)`** - Mark value as final (JSON-serializable)
-2. **`has_final_answer()`** - Check if answer is set
-3. **`get_final_answer()`** - Retrieve the value
-4. **`get-final-answer` CLI command** - JSON output for external retrieval
-5. **Updated `status` command** - Show final answer info
-
-### Implementation Details
-
-**Helper functions:**
-```python
-def set_final_answer(value: Any) -> None:
-    """Mark a value as the final answer."""
-    try:
-        json.dumps(value)
-    except (TypeError, ValueError) as e:
-        raise ValueError(f"Final answer must be JSON-serializable: {e}")
-    
-    state_ref["final_answer"] = {
-        "set_at": datetime.utcnow().isoformat() + "Z",
-        "value": value,
-    }
-    print(f"Final answer set (type: {type(value).__name__})")
-
-def has_final_answer() -> bool:
-    return state_ref.get("final_answer") is not None
-
-def get_final_answer() -> Any:
-    fa = state_ref.get("final_answer")
-    return fa["value"] if fa else None
-```
-
-**CLI command:**
-```bash
-python3 rlm_repl.py --state ... get-final-answer
-# Output (JSON):
-{"set": true, "value": [[1, 2], [3, 4]], "set_at": "2026-01-21T12:30:45.123Z"}
-```
-
-**Updated status output:**
-```
-RLM REPL status
-  ...
-  Final answer: SET (type: list, length: 3)
-```
-
-### Files to Modify
-- `skills/rlm/scripts/rlm_repl.py` (add ~60-80 lines)
-- `skills/rlm/SKILL.md` (document finalization pattern)
-- `skills/rlm/tests/test_phase4_finalize.py` (new)
-
-### Tests to Write
-
-**`skills/rlm/tests/test_phase4_finalize.py`:**
-
-```python
-"""Phase 4 tests: Answer finalization signal."""
-import pytest
-import json
-import pickle
-import subprocess
-from pathlib import Path
-
-class TestSetFinalAnswer:
-    """Unit tests for set_final_answer()."""
-    
-    def test_stores_value_in_state(self, init_session, tmp_path):
-        state_path = init_session(tmp_path, "content")
-        # Run exec with set_final_answer
-        # Load state, verify final_answer key exists
-        pass
-    
-    def test_adds_timestamp(self, init_session, tmp_path):
-        # Verify set_at is ISO 8601 format
-        pass
-    
-    def test_rejects_non_serializable(self, init_session, tmp_path):
-        """Non-JSON-serializable values raise ValueError."""
-        import re
-        # set_final_answer(re.compile('test')) should raise
-        pass
-    
-    def test_overwrites_previous(self, init_session, tmp_path):
-        """Subsequent calls overwrite previous answer."""
-        pass
-
-class TestHasGetFinalAnswer:
-    """Unit tests for has_final_answer() and get_final_answer()."""
-    
-    def test_has_final_answer_false_initially(self):
-        pass
-    
-    def test_has_final_answer_true_after_set(self):
-        pass
-    
-    def test_get_returns_none_if_not_set(self):
-        pass
-    
-    def test_get_returns_value_if_set(self):
-        pass
-
-class TestGetFinalAnswerCLI:
-    """Unit tests for get-final-answer CLI command."""
-    
-    def test_outputs_valid_json(self, init_session, tmp_path):
-        # Run CLI command, parse output as JSON
-        pass
-    
-    def test_shows_set_false_when_not_set(self):
-        pass
-    
-    def test_shows_set_true_with_value(self):
-        pass
-
-class TestGoalFinalizationSignal:
-    """Goal-alignment: Main agent can retrieve final answer.
-    
-    Paper requirement: "Add set_final_answer() to mark variables for retrieval"
-    """
-    
-    def test_goal_finalization_signal(self, init_session, tmp_path):
-        """Full cycle: set in exec, retrieve via CLI."""
-        state_path = init_session(tmp_path, "content")
-        
-        # Set answer via exec
-        subprocess.run([
-            "python3", "skills/rlm/scripts/rlm_repl.py",
-            "--state", str(state_path),
-            "exec", "-c", "set_final_answer({'result': 42})"
-        ])
-        
-        # Retrieve via CLI
-        result = subprocess.run([
-            "python3", "skills/rlm/scripts/rlm_repl.py",
-            "--state", str(state_path),
-            "get-final-answer"
-        ], capture_output=True, text=True)
-        
-        data = json.loads(result.stdout)
-        assert data["set"] == True
-        assert data["value"]["result"] == 42
-```
-
-### Validation Steps
-
-1. **Run phase tests**
-   ```bash
-   pytest skills/rlm/tests/test_phase4_finalize.py -v
-   ```
-
-2. **Regression check**
-   ```bash
-   pytest skills/rlm/tests/test_phase{1,2,3,4}_*.py -v
-   ```
-
-3. **Goal-alignment test**
-   ```bash
-   pytest skills/rlm/tests/test_phase4_finalize.py -v -k "test_goal_"
-   ```
-
-4. **Manual smoke test**
-   ```bash
-   python3 skills/rlm/scripts/rlm_repl.py --state <state_path> exec -c "
-   set_final_answer({'summary': 'Test complete', 'items': [1, 2, 3]})
-   "
-   python3 skills/rlm/scripts/rlm_repl.py --state <state_path> get-final-answer
-   python3 skills/rlm/scripts/rlm_repl.py --state <state_path> status
-   ```
-
-5. **Goal-alignment verification**
-   - [ ] `set_final_answer(value)` persists to state
-   - [ ] Only JSON-serializable values accepted
-   - [ ] `get-final-answer` CLI returns valid JSON
-   - [ ] `status` shows "Final answer: SET (type: ...)"
-
----
-
-## Phase 5: Semantic Chunking - Markdown
+## Phase 4: Semantic Chunking - Markdown ✅
+**Status:** COMPLETED
 **Estimated tokens:** ~80k-100k
 
 ### Deliverables
@@ -1032,14 +856,14 @@ def _detect_format(content: str, context_path: str) -> str:
 
 ### Files to Modify
 - `skills/rlm/scripts/rlm_repl.py` (add ~120-150 lines)
-- `skills/rlm/tests/test_phase5_markdown.py` (new)
+- `skills/rlm/tests/test_phase4_semantic.py` (new)
 
 ### Tests to Write
 
-**`skills/rlm/tests/test_phase5_markdown.py`:**
+**`skills/rlm/tests/test_phase4_semantic.py`:**
 
 ```python
-"""Phase 5 tests: Semantic chunking - Markdown."""
+"""Phase 4 tests: Semantic chunking - Markdown."""
 import pytest
 import json
 from pathlib import Path
@@ -1149,7 +973,7 @@ Logging details.
 
 1. **Run phase tests**
    ```bash
-   pytest skills/rlm/tests/test_phase5_markdown.py -v
+   pytest skills/rlm/tests/test_phase4_semantic.py -v
    ```
 
 2. **Regression check**
@@ -1159,7 +983,7 @@ Logging details.
 
 3. **Goal-alignment test**
    ```bash
-   pytest skills/rlm/tests/test_phase5_markdown.py -v -k "test_goal_"
+   pytest skills/rlm/tests/test_phase4_semantic.py -v -k "test_goal_"
    ```
 
 4. **Manual smoke test**
@@ -1181,7 +1005,189 @@ Logging details.
 
 ---
 
-## Phase 6: Semantic Chunking - Code (Codemap Integration)
+## Phase 5: Finalization Signal ✅
+**Status:** COMPLETED
+**Estimated tokens:** ~60k-80k
+
+### Deliverables
+1. **`set_final_answer(value)`** - Mark value as final (JSON-serializable)
+2. **`has_final_answer()`** - Check if answer is set
+3. **`get_final_answer()`** - Retrieve the value
+4. **`get-final-answer` CLI command** - JSON output for external retrieval
+5. **Updated `status` command** - Show final answer info
+
+### Implementation Details
+
+**Helper functions:**
+```python
+def set_final_answer(value: Any) -> None:
+    """Mark a value as the final answer."""
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Final answer must be JSON-serializable: {e}")
+    
+    state_ref["final_answer"] = {
+        "set_at": datetime.utcnow().isoformat() + "Z",
+        "value": value,
+    }
+    print(f"Final answer set (type: {type(value).__name__})")
+
+def has_final_answer() -> bool:
+    return state_ref.get("final_answer") is not None
+
+def get_final_answer() -> Any:
+    fa = state_ref.get("final_answer")
+    return fa["value"] if fa else None
+```
+
+**CLI command:**
+```bash
+python3 rlm_repl.py --state ... get-final-answer
+# Output (JSON):
+{"set": true, "value": [[1, 2], [3, 4]], "set_at": "2026-01-21T12:30:45.123Z"}
+```
+
+**Updated status output:**
+```
+RLM REPL status
+  ...
+  Final answer: SET (type: list, length: 3)
+```
+
+### Files to Modify
+- `skills/rlm/scripts/rlm_repl.py` (add ~60-80 lines)
+- `skills/rlm/SKILL.md` (document finalization pattern)
+- `skills/rlm/tests/test_phase5_finalize.py` (new)
+
+### Tests to Write
+
+**`skills/rlm/tests/test_phase5_finalize.py`:**
+
+```python
+"""Phase 5 tests: Answer finalization signal."""
+import pytest
+import json
+import pickle
+import subprocess
+from pathlib import Path
+
+class TestSetFinalAnswer:
+    """Unit tests for set_final_answer()."""
+    
+    def test_stores_value_in_state(self, init_session, tmp_path):
+        state_path = init_session(tmp_path, "content")
+        # Run exec with set_final_answer
+        # Load state, verify final_answer key exists
+        pass
+    
+    def test_adds_timestamp(self, init_session, tmp_path):
+        # Verify set_at is ISO 8601 format
+        pass
+    
+    def test_rejects_non_serializable(self, init_session, tmp_path):
+        """Non-JSON-serializable values raise ValueError."""
+        import re
+        # set_final_answer(re.compile('test')) should raise
+        pass
+    
+    def test_overwrites_previous(self, init_session, tmp_path):
+        """Subsequent calls overwrite previous answer."""
+        pass
+
+class TestHasGetFinalAnswer:
+    """Unit tests for has_final_answer() and get_final_answer()."""
+    
+    def test_has_final_answer_false_initially(self):
+        pass
+    
+    def test_has_final_answer_true_after_set(self):
+        pass
+    
+    def test_get_returns_none_if_not_set(self):
+        pass
+    
+    def test_get_returns_value_if_set(self):
+        pass
+
+class TestGetFinalAnswerCLI:
+    """Unit tests for get-final-answer CLI command."""
+    
+    def test_outputs_valid_json(self, init_session, tmp_path):
+        # Run CLI command, parse output as JSON
+        pass
+    
+    def test_shows_set_false_when_not_set(self):
+        pass
+    
+    def test_shows_set_true_with_value(self):
+        pass
+
+class TestGoalFinalizationSignal:
+    """Goal-alignment: Main agent can retrieve final answer.
+    
+    Paper requirement: "Add set_final_answer() to mark variables for retrieval"
+    """
+    
+    def test_goal_finalization_signal(self, init_session, tmp_path):
+        """Full cycle: set in exec, retrieve via CLI."""
+        state_path = init_session(tmp_path, "content")
+        
+        # Set answer via exec
+        subprocess.run([
+            "python3", "skills/rlm/scripts/rlm_repl.py",
+            "--state", str(state_path),
+            "exec", "-c", "set_final_answer({'result': 42})"
+        ])
+        
+        # Retrieve via CLI
+        result = subprocess.run([
+            "python3", "skills/rlm/scripts/rlm_repl.py",
+            "--state", str(state_path),
+            "get-final-answer"
+        ], capture_output=True, text=True)
+        
+        data = json.loads(result.stdout)
+        assert data["set"] == True
+        assert data["value"]["result"] == 42
+```
+
+### Validation Steps
+
+1. **Run phase tests**
+   ```bash
+   pytest skills/rlm/tests/test_phase5_finalize.py -v
+   ```
+
+2. **Regression check**
+   ```bash
+   pytest skills/rlm/tests/test_phase{1,2,3,4}_*.py -v
+   ```
+
+3. **Goal-alignment test**
+   ```bash
+   pytest skills/rlm/tests/test_phase5_finalize.py -v -k "test_goal_"
+   ```
+
+4. **Manual smoke test**
+   ```bash
+   python3 skills/rlm/scripts/rlm_repl.py --state <state_path> exec -c "
+   set_final_answer({'summary': 'Test complete', 'items': [1, 2, 3]})
+   "
+   python3 skills/rlm/scripts/rlm_repl.py --state <state_path> get-final-answer
+   python3 skills/rlm/scripts/rlm_repl.py --state <state_path> status
+   ```
+
+5. **Goal-alignment verification**
+   - [ ] `set_final_answer(value)` persists to state
+   - [ ] Only JSON-serializable values accepted
+   - [ ] `get-final-answer` CLI returns valid JSON
+   - [ ] `status` shows "Final answer: SET (type: ...)"
+
+---
+
+## Phase 6: Semantic Chunking - Code (Codemap Integration) ⬅️ NEXT
+**Status:** NOT STARTED
 **Estimated tokens:** ~100k-120k
 
 ### Deliverables
@@ -1672,18 +1678,19 @@ def mock_subprocess(monkeypatch):
 
 ## Summary
 
-| Phase | Title | Est. Tokens | Key Deliverables |
-|-------|-------|-------------|------------------|
-| 1 | Core `llm_query()` | ~100k-110k | Subprocess spawning, JSON parsing, logging |
-| 2 | Depth Tracking | ~80k-100k | `--max-depth`, recursive directories, cleanup |
-| 3 | `llm_query_batch()` | ~80k-100k | Parallel execution, retries, failures dict |
-| 4 | Finalization Signal | ~60k-80k | `set_final_answer()`, CLI retrieval |
-| 5 | Smart Chunk - Markdown | ~80k-100k | Header-aware splitting, format detection |
-| 6 | Smart Chunk - Code | ~100k-120k | Codemap integration, symbol boundaries |
-| 7 | Smart Chunk - JSON | ~60k-80k | Array/object splitting |
-| 8 | Docs & Integration | ~60k-80k | Full documentation, integration tests |
+| Phase | Title | Est. Tokens | Key Deliverables | Status |
+|-------|-------|-------------|------------------|--------|
+| 1 | Core `llm_query()` | ~100k-110k | Subprocess spawning, JSON parsing, logging | ✅ Done |
+| 2 | Depth Tracking | ~80k-100k | `--max-depth`, recursive directories, cleanup | ✅ Done |
+| 3 | `llm_query_batch()` | ~80k-100k | Parallel execution, retries, failures dict | ✅ Done |
+| 4 | Smart Chunk - Markdown | ~80k-100k | Header-aware splitting, format detection | ✅ Done |
+| 5 | Finalization Signal | ~60k-80k | `set_final_answer()`, CLI retrieval | ✅ Done |
+| 6 | Smart Chunk - Code | ~100k-120k | Codemap integration, symbol boundaries | ⬅️ Next |
+| 7 | Smart Chunk - JSON | ~60k-80k | Array/object splitting | |
+| 8 | Docs & Integration | ~60k-80k | Full documentation, integration tests | |
 
 **Total: 8 phases, ~620k-750k estimated tokens**
+**Progress: 5/8 phases complete**
 
 ---
 

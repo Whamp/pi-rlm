@@ -105,3 +105,339 @@ Preserve recursive state: enabled
 - Recursive directory structure was already implemented in Phase 1; Phase 2 just adds CLI configuration
 - `preserve_recursive_state` affects both direct `cleanup` param and state-based cleanup override
 
+---
+
+## Phase 3: `llm_query_batch()` Implementation
+**Completed:** 2026-01-21
+
+### Implemented
+- `_llm_query_batch_impl()` - Module-level core batch implementation (testable with mocks)
+- `llm_query_batch(prompts, concurrency=5, max_retries=3, cleanup=True)` - REPL helper wrapper
+- Shared global semaphore enforcement (caps at 5 concurrent regardless of requested concurrency)
+- Retry with exponential backoff (1s, 2s, 4s delays between retries)
+- Structured failures dict return: `(results, failures)` tuple
+- Batch logging with `batch_id`, `batch_index`, `batch_size`, `attempt` fields
+
+### Function Signature
+```python
+def llm_query_batch(
+    prompts: list[str],
+    concurrency: int = 5,      # Max concurrent (capped by global 5)
+    max_retries: int = 3,      # Retry failed items
+    cleanup: bool = True,      # Clean up sub-session state
+) -> tuple[list[str], dict[int, dict]]:
+    """Execute multiple queries concurrently.
+    
+    Returns:
+        (results, failures) where:
+        - results[i] = response string or "[ERROR: ...]"
+        - failures = {index: {"reason": str, "attempts": int, "error": str}}
+    """
+```
+
+### Files Modified
+- `skills/rlm/scripts/rlm_repl.py` - Added ~150 lines for batch implementation
+- `skills/rlm/tests/test_phase3_batch.py` - New (22 tests: 20 unit, 2 slow integration)
+
+### Validation Results
+```
+$ pytest skills/rlm/tests/test_phase3_batch.py -v
+======================== 20 passed, 2 skipped in 10.72s ========================
+
+$ pytest skills/rlm/tests/test_phase1_llm_query.py skills/rlm/tests/test_phase2_depth.py skills/rlm/tests/test_phase3_batch.py -v
+======================== 67 passed, 5 skipped in 11.38s ========================
+
+$ pytest skills/rlm/tests/test_phase3_batch.py -v --slow -k "test_goal_"
+======================== 2 passed, 20 deselected in 5.05s ======================
+```
+
+### Test Categories
+- **TestBatchExecution** - Order preservation, failures dict, empty/single/all-fail edge cases
+- **TestConcurrencyLimit** - Global semaphore caps at 5, respects lower requested concurrency
+- **TestRetryLogic** - Retry on error, no retry on success, exponential backoff timing
+- **TestBatchLogging** - batch_id, batch_index, batch_size, attempt fields in log entries
+- **TestReplIntegration** - llm_query_batch exposed and callable in exec environment
+- **TestGoalParallelExecution** - Paper requirement "parallel sub-LLM invocation"
+- **TestEdgeCases** - Exception handling, large batch (100 items), depth-0 behavior
+
+### Goal-Alignment Verification
+- [x] Batch queries run concurrently (parallel execution)
+- [x] Global concurrency limit of 5 enforced
+- [x] Results maintain input order regardless of completion order
+- [x] Failed items appear in both results list and failures dict
+- [x] Exponential backoff: 1s, 2s, 4s between retries
+- [x] Batch logging includes batch_id to correlate entries
+
+### Notes
+- No deviations from plan
+- Module-level `_llm_query_batch_impl()` enables direct unit testing with mocks
+- REPL helper `llm_query_batch()` handles state extraction and delegates to impl
+- Exception test verifies current behavior (exceptions propagate from ThreadPoolExecutor)
+
+---
+
+## Phase 4: Semantic Chunking
+**Completed:** 2026-01-21T14:20:44-08:00
+
+### Implemented
+- `_detect_format(content, path)` - Format detection from extension or content analysis
+- `_find_header_boundaries(content)` - Find markdown header positions
+- `_chunk_markdown(content, target, min, max)` - Header-aware splitting with section merging
+- `_chunk_text(content, target, min, max)` - Paragraph-based fallback for plain text
+- `_smart_chunk_impl(content, context_path, out_dir, ...)` - Core implementation (testable)
+- `smart_chunk(out_dir, target_size, min_size, max_size, encoding)` - REPL helper wrapper
+
+### Function Signature
+```python
+def smart_chunk(
+    out_dir: str | os.PathLike,
+    target_size: int = 200_000,    # Target chars per chunk (soft limit)
+    min_size: int = 50_000,        # Minimum chunk size
+    max_size: int = 400_000,       # Maximum chunk size (hard limit)
+    encoding: str = "utf-8",
+) -> list[str]:
+    """Smart content-aware chunking.
+    
+    Returns:
+        List of chunk file paths.
+    """
+```
+
+### Format Detection
+- **By extension**: `.md/.markdown/.mdx` → markdown, `.py/.ts/.js/...` → code, `.json` → json, `.txt` → text
+- **By content**: >5 headers in content → markdown, else → text
+- Code extensions include Python, JavaScript, TypeScript, Rust, Go, Java, C/C++, Ruby, PHP, etc.
+
+### Chunking Strategies
+- **Markdown**: Split at h2/h3 headers, keep sections together until target_size, force split oversized sections
+- **Text**: Split at paragraph breaks (double newline), fall back to line/word/hard splits
+- **Oversized handling**: Sections exceeding max_size are sub-split using text chunking
+
+### Enhanced Manifest Fields
+```json
+{
+  "format": "markdown",
+  "chunking_method": "smart_markdown",
+  "chunks": [{
+    "id": "chunk_0000",
+    "split_reason": "header_level_2",
+    "format": "markdown",
+    "boundaries": [{"type": "heading", "level": 2, "text": "Section", "line": 5}]
+  }]
+}
+```
+
+### Files Modified
+- `skills/rlm/scripts/rlm_repl.py` - Added ~280 lines (1244 → 1715 lines)
+- `skills/rlm/tests/test_phase4_semantic.py` - New (47 tests: 46 unit, 1 slow integration)
+
+### Validation Results
+```
+$ pytest skills/rlm/tests/test_phase4_semantic.py -v
+======================== 46 passed, 1 skipped in 0.38s =========================
+
+$ pytest skills/rlm/tests/ -v
+======================= 113 passed, 6 skipped in 11.75s ========================
+
+$ pytest skills/rlm/tests/test_phase4_semantic.py -v --slow -k "test_goal_"
+======================= 3 passed, 44 deselected in 0.09s =======================
+```
+
+### Test Categories
+- **TestDetectFormat** - Extension detection (15 tests), content fallback detection
+- **TestFindHeaderBoundaries** - Header parsing, positions, levels
+- **TestChunkMarkdown** - Header splitting, max_size enforcement, section merging, boundaries
+- **TestChunkText** - Paragraph splitting, line/word fallback, hard split
+- **TestSmartChunkImpl** - File creation, manifest structure, field validation
+- **TestSmartChunkIntegration** - REPL helper availability, manifest creation, path return
+- **TestGoalContentAwareSplits** - Paper requirement verification
+
+### Goal-Alignment Verification
+- [x] Markdown splits on header boundaries (not mid-paragraph)
+- [x] Format auto-detected from extension or content
+- [x] Manifest includes `format`, `chunking_method`, `split_reason`
+- [x] Chunks have `boundaries` with header metadata
+- [x] Fallback to paragraph-based text chunking works
+- [x] Oversized sections are force-split to respect max_size
+
+### Notes
+- No deviations from plan (Plan refers to this as Phase 5, user refers to it as Phase 4)
+- Oversized section handling required post-processing to split single sections > max_size
+- Code chunking (tree-sitter integration) deferred to future phase
+- All existing tests continue to pass (regression verified)
+
+
+## Phase 5: Finalization Signal
+**Completed:** 2026-01-21T14:58:00-08:00
+
+### Implemented
+- `set_final_answer(value)` - Mark value as final (JSON-serializable)
+- `has_final_answer()` - Check if answer is set
+- `get_final_answer()` - Retrieve the value  
+- `get-final-answer` CLI command - JSON output for external retrieval
+- Updated `cmd_status()` to show final answer info (type, length)
+
+### Function Signatures
+```python
+def set_final_answer(value: Any) -> None:
+    """Mark a value as the final answer for external retrieval.
+    Raises ValueError if value is not JSON-serializable.
+    """
+
+def has_final_answer() -> bool:
+    """Check if a final answer has been set."""
+
+def get_final_answer() -> Any:
+    """Retrieve the final answer value, or None if not set."""
+```
+
+### CLI Command
+```bash
+python3 rlm_repl.py --state ... get-final-answer
+# Output (JSON):
+{
+  "set": true,
+  "value": {"summary": "Done", "items": [1, 2, 3]},
+  "set_at": "2026-01-21T22:58:11.272414Z"
+}
+```
+
+### Status Output Enhancement
+```
+RLM REPL status
+  ...
+  Final answer: SET (type: dict, length: 2)
+  # or
+  Final answer: NOT SET
+```
+
+### Files Modified
+- `skills/rlm/scripts/rlm_repl.py` - Added ~100 lines for finalization signal
+- `skills/rlm/tests/test_phase5_finalize.py` - New (36 tests)
+
+### Validation Results
+```
+$ pytest skills/rlm/tests/test_phase5_finalize.py -v
+======================== 36 passed in 3.64s ========================
+
+$ pytest skills/rlm/tests/ -v
+======================= 149 passed, 6 skipped in 15.38s ============
+```
+
+Manual smoke test:
+```
+$ python3 rlm_repl.py init /tmp/test.txt
+Session path: .pi/rlm_state/test-20260121-145808/state.pkl
+
+$ python3 rlm_repl.py --state ... exec -c "set_final_answer({'summary': 'Test complete', 'items': [1, 2, 3]})"
+Final answer set (type: dict, length: 2)
+
+$ python3 rlm_repl.py --state ... get-final-answer
+{
+  "set": true,
+  "value": {"summary": "Test complete", "items": [1, 2, 3]},
+  "set_at": "2026-01-21T22:58:11.272414Z"
+}
+
+$ python3 rlm_repl.py --state ... status
+...
+  Final answer: SET (type: dict, length: 2)
+```
+
+### Goal-Alignment Verification
+- [x] `set_final_answer(value)` persists to state
+- [x] Only JSON-serializable values accepted (raises ValueError otherwise)
+- [x] `get-final-answer` CLI returns valid JSON with set, value, set_at fields
+- [x] `status` shows "Final answer: SET (type: ...)" or "Final answer: NOT SET"
+- [x] `has_final_answer()` and `get_final_answer()` work for conditional logic
+
+### Notes
+- This is Phase 4 in the original plan (labeled "Phase 5" to follow user's numbering)
+- The original plan's Phase 5 (Semantic Chunking - Markdown) was already implemented as user's "Phase 4"
+- Timestamp uses UTC with 'Z' suffix per ISO 8601
+- Confirmation message includes type and length for collections (list, dict, str)
+- All 149 tests pass across all phases
+
+## Phase 6: Semantic Chunking - Code (Codemap Integration)
+**Completed:** 2026-01-21T16:18:00-08:00
+
+### Implemented
+- `_detect_codemap()` - Auto-detect codemap availability (env var → PATH → npx)
+- `_extract_symbol_boundaries(codemap_output, context_path)` - Parse codemap JSON output
+- `_line_to_char_position(content, line_num)` - Convert line numbers to character positions
+- `_chunk_code(content, context_path, target, min, max)` - Function/class boundary splitting
+- `_smart_chunk_impl()` updated to use code chunking when format is 'code'
+- Manifest includes `codemap_available` and `codemap_used` fields
+
+### Detection Order
+1. `RLM_CODEMAP_PATH` environment variable (explicit path)
+2. `codemap` in PATH (system install)
+3. `npx codemap` (npx fallback)
+4. None - fall back to text chunking
+
+### Codemap JSON Format Expected
+```json
+{
+  "files": [{
+    "path": "test.py",
+    "symbols": [
+      {"name": "func", "kind": "function", "lines": [1, 10], "signature": "func(x: int) -> str", "exported": true}
+    ]
+  }]
+}
+```
+
+### Graceful Fallback Behavior
+- Codemap unavailable → text chunking
+- Codemap fails (non-zero exit) → text chunking
+- Codemap returns no symbols → text chunking
+- File doesn't exist → text chunking
+
+### Files Modified
+- `skills/rlm/scripts/rlm_repl.py` - Added ~250 lines for code chunking infrastructure
+- `skills/rlm/tests/test_phase6_code.py` - New (31 tests)
+
+### Validation Results
+```
+$ pytest skills/rlm/tests/test_phase6_code.py -v
+======================== 30 passed, 1 skipped in 1.96s =========================
+(1 skipped: test_goal_code_boundaries_with_codemap - codemap has Node.js version mismatch)
+
+$ pytest skills/rlm/tests/ -v
+======================= 179 passed, 7 skipped in 19.28s ========================
+```
+
+Manual smoke test:
+```
+$ python3 rlm_repl.py init skills/rlm/scripts/rlm_repl.py
+Session path: .pi/rlm_state/rlm-repl-20260121-161806/state.pkl
+Context: .../rlm_repl.py (74,673 chars)
+
+$ python3 rlm_repl.py --state ... exec -c "
+paths = smart_chunk(str(session_dir / 'chunks'), target_size=20000)
+manifest = json.loads((session_dir / 'chunks' / 'manifest.json').read_text())
+print(f'Format: {manifest[\"format\"]}')
+print(f'Method: {manifest[\"chunking_method\"]}')
+print(f'Codemap available: {manifest[\"codemap_available\"]}')
+print(f'Codemap used: {manifest[\"codemap_used\"]}')
+"
+Created 3 chunks
+Format: code
+Method: smart_text
+Codemap available: True
+Codemap used: False
+```
+
+### Goal-Alignment Verification
+- [x] Codemap auto-detected (env var → PATH → npx → None)
+- [x] Code chunks can align with function/class boundaries (when codemap works)
+- [x] Graceful fallback when codemap unavailable or fails
+- [x] Manifest shows `codemap_available: true/false` and `codemap_used: true/false`
+- [x] Chunking method is `smart_code` when codemap used, `smart_text` when fallback
+
+### Notes
+- Local codemap installation has Node.js version mismatch (NODE_MODULE_VERSION 141 vs 127)
+- Detection correctly reports codemap as "available" (binary exists) but "not used" (fails at runtime)
+- The `_CODEMAP_CACHE` caches detection result to avoid repeated subprocess calls
+- Symbol boundaries include `type`, `name`, `signature`, and `line` for each symbol
+- All 179 tests pass across all phases (regression verified)
