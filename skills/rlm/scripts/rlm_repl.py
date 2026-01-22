@@ -853,6 +853,362 @@ def _chunk_text(
     return chunks
 
 
+# =============================================================================
+# JSON Semantic Chunking (Phase 7)
+# =============================================================================
+
+def _chunk_json_array(
+    content: str,
+    target_size: int,
+    min_size: int,
+    max_size: int,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Split JSON array content into element groups.
+    
+    Strategy:
+    - Parse JSON to identify array elements
+    - Group elements together to meet target_size
+    - Each chunk is re-serialized as valid JSON array
+    - Manifest includes element indices (not char positions)
+    
+    Args:
+        content: JSON array content to chunk.
+        target_size: Target chunk size in characters.
+        min_size: Minimum chunk size.
+        max_size: Maximum chunk size (hard limit).
+    
+    Returns:
+        Tuple of (chunk_metas, success) where:
+        - chunk_metas: List of chunk metadata dicts with special fields:
+            - start: start character position (always 0 for serialized chunks)
+            - end: end character position
+            - split_reason: why split occurred
+            - boundaries: empty for JSON
+            - element_range: [start_idx, end_idx] for array elements
+            - json_content: re-serialized JSON chunk content
+        - success: True if JSON parsing succeeded, False otherwise
+    """
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return [], False
+    
+    if not isinstance(data, list):
+        return [], False
+    
+    if len(data) == 0:
+        # Empty array - single chunk
+        return [{
+            'start': 0,
+            'end': len(content),
+            'split_reason': 'single_chunk',
+            'boundaries': [],
+            'element_range': [0, 0],
+            'json_content': content,
+        }], True
+    
+    # If content is small enough, return as single chunk
+    if len(content) <= max_size:
+        return [{
+            'start': 0,
+            'end': len(content),
+            'split_reason': 'single_chunk',
+            'boundaries': [],
+            'element_range': [0, len(data)],
+            'json_content': content,
+        }], True
+    
+    # Estimate elements per chunk based on average element size
+    # Serialize each element to estimate sizes
+    element_sizes = []
+    for elem in data:
+        elem_json = json.dumps(elem, separators=(',', ':'))
+        element_sizes.append(len(elem_json))
+    
+    total_size = sum(element_sizes)
+    avg_element_size = total_size / len(data) if data else 0
+    
+    # Account for array brackets and commas
+    overhead_per_element = 1  # comma
+    overhead_fixed = 2  # [ and ]
+    
+    # Estimate elements per chunk
+    if avg_element_size + overhead_per_element > 0:
+        elements_per_chunk = max(1, int(
+            (target_size - overhead_fixed) / (avg_element_size + overhead_per_element)
+        ))
+    else:
+        elements_per_chunk = len(data)
+    
+    chunks = []
+    i = 0
+    
+    while i < len(data):
+        # Start with estimated elements_per_chunk
+        chunk_end = min(i + elements_per_chunk, len(data))
+        
+        # Serialize chunk to check size
+        chunk_data = data[i:chunk_end]
+        chunk_json = json.dumps(chunk_data, indent=2)
+        
+        # Adjust if too large
+        while len(chunk_json) > max_size and chunk_end > i + 1:
+            chunk_end -= 1
+            chunk_data = data[i:chunk_end]
+            chunk_json = json.dumps(chunk_data, indent=2)
+        
+        # Adjust if too small and can add more
+        while chunk_end < len(data) and len(chunk_json) < target_size:
+            test_end = chunk_end + 1
+            test_data = data[i:test_end]
+            test_json = json.dumps(test_data, indent=2)
+            if len(test_json) <= max_size:
+                chunk_end = test_end
+                chunk_data = test_data
+                chunk_json = test_json
+            else:
+                break
+        
+        # Determine split reason
+        if not chunks:
+            split_reason = 'start'
+        elif chunk_end >= len(data):
+            split_reason = 'end'
+        else:
+            split_reason = 'element_boundary'
+        
+        chunks.append({
+            'start': 0,  # Not used for JSON - we use json_content
+            'end': len(chunk_json),
+            'split_reason': split_reason,
+            'boundaries': [],
+            'element_range': [i, chunk_end],
+            'json_content': chunk_json,
+        })
+        
+        i = chunk_end
+    
+    # Merge tiny trailing chunk if under min_size
+    if len(chunks) > 1:
+        last = chunks[-1]
+        last_size = len(last['json_content'])
+        if last_size < min_size:
+            prev = chunks[-2]
+            # Merge elements and re-serialize
+            combined_start = prev['element_range'][0]
+            combined_end = last['element_range'][1]
+            combined_data = data[combined_start:combined_end]
+            combined_json = json.dumps(combined_data, indent=2)
+            
+            if len(combined_json) <= max_size:
+                prev['element_range'] = [combined_start, combined_end]
+                prev['json_content'] = combined_json
+                prev['end'] = len(combined_json)
+                chunks.pop()
+    
+    return chunks, True
+
+
+def _chunk_json_object(
+    content: str,
+    target_size: int,
+    min_size: int,
+    max_size: int,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Split JSON object content by top-level keys.
+    
+    Strategy:
+    - Parse JSON to identify top-level keys
+    - Group keys together to meet target_size
+    - Each chunk is re-serialized as valid JSON object
+    - Manifest includes key list for each chunk
+    
+    Args:
+        content: JSON object content to chunk.
+        target_size: Target chunk size in characters.
+        min_size: Minimum chunk size.
+        max_size: Maximum chunk size (hard limit).
+    
+    Returns:
+        Tuple of (chunk_metas, success) where:
+        - chunk_metas: List of chunk metadata dicts with special fields:
+            - start: start character position (always 0 for serialized chunks)
+            - end: end character position
+            - split_reason: why split occurred
+            - boundaries: empty for JSON
+            - key_range: [start_idx, end_idx] for key indices
+            - keys: list of key names in this chunk
+            - json_content: re-serialized JSON chunk content
+        - success: True if JSON parsing succeeded, False otherwise
+    """
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return [], False
+    
+    if not isinstance(data, dict):
+        return [], False
+    
+    if len(data) == 0:
+        # Empty object - single chunk
+        return [{
+            'start': 0,
+            'end': len(content),
+            'split_reason': 'single_chunk',
+            'boundaries': [],
+            'key_range': [0, 0],
+            'keys': [],
+            'json_content': content,
+        }], True
+    
+    # If content is small enough, return as single chunk
+    if len(content) <= max_size:
+        keys = list(data.keys())
+        return [{
+            'start': 0,
+            'end': len(content),
+            'split_reason': 'single_chunk',
+            'boundaries': [],
+            'key_range': [0, len(keys)],
+            'keys': keys,
+            'json_content': content,
+        }], True
+    
+    keys = list(data.keys())
+    
+    # Estimate key-value pair sizes
+    kv_sizes = []
+    for k in keys:
+        kv_json = json.dumps({k: data[k]}, separators=(',', ':'))
+        # Subtract 2 for outer braces, this gives us the key-value size
+        kv_sizes.append(len(kv_json) - 2)
+    
+    total_size = sum(kv_sizes)
+    avg_kv_size = total_size / len(keys) if keys else 0
+    
+    # Estimate keys per chunk
+    overhead_fixed = 2  # { and }
+    overhead_per_kv = 1  # comma
+    
+    if avg_kv_size + overhead_per_kv > 0:
+        keys_per_chunk = max(1, int(
+            (target_size - overhead_fixed) / (avg_kv_size + overhead_per_kv)
+        ))
+    else:
+        keys_per_chunk = len(keys)
+    
+    chunks = []
+    i = 0
+    
+    while i < len(keys):
+        # Start with estimated keys_per_chunk
+        chunk_end = min(i + keys_per_chunk, len(keys))
+        
+        # Build chunk dict and serialize
+        chunk_keys = keys[i:chunk_end]
+        chunk_data = {k: data[k] for k in chunk_keys}
+        chunk_json = json.dumps(chunk_data, indent=2)
+        
+        # Adjust if too large
+        while len(chunk_json) > max_size and chunk_end > i + 1:
+            chunk_end -= 1
+            chunk_keys = keys[i:chunk_end]
+            chunk_data = {k: data[k] for k in chunk_keys}
+            chunk_json = json.dumps(chunk_data, indent=2)
+        
+        # Adjust if too small and can add more
+        while chunk_end < len(keys) and len(chunk_json) < target_size:
+            test_end = chunk_end + 1
+            test_keys = keys[i:test_end]
+            test_data = {k: data[k] for k in test_keys}
+            test_json = json.dumps(test_data, indent=2)
+            if len(test_json) <= max_size:
+                chunk_end = test_end
+                chunk_keys = test_keys
+                chunk_data = test_data
+                chunk_json = test_json
+            else:
+                break
+        
+        # Determine split reason
+        if not chunks:
+            split_reason = 'start'
+        elif chunk_end >= len(keys):
+            split_reason = 'end'
+        else:
+            split_reason = 'key_boundary'
+        
+        chunks.append({
+            'start': 0,  # Not used for JSON - we use json_content
+            'end': len(chunk_json),
+            'split_reason': split_reason,
+            'boundaries': [],
+            'key_range': [i, chunk_end],
+            'keys': chunk_keys,
+            'json_content': chunk_json,
+        })
+        
+        i = chunk_end
+    
+    # Merge tiny trailing chunk if under min_size
+    if len(chunks) > 1:
+        last = chunks[-1]
+        last_size = len(last['json_content'])
+        if last_size < min_size:
+            prev = chunks[-2]
+            # Merge keys and re-serialize
+            combined_start = prev['key_range'][0]
+            combined_end = last['key_range'][1]
+            combined_keys = keys[combined_start:combined_end]
+            combined_data = {k: data[k] for k in combined_keys}
+            combined_json = json.dumps(combined_data, indent=2)
+            
+            if len(combined_json) <= max_size:
+                prev['key_range'] = [combined_start, combined_end]
+                prev['keys'] = combined_keys
+                prev['json_content'] = combined_json
+                prev['end'] = len(combined_json)
+                chunks.pop()
+    
+    return chunks, True
+
+
+def _chunk_json(
+    content: str,
+    target_size: int,
+    min_size: int,
+    max_size: int,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Split JSON content at structural boundaries.
+    
+    Detects whether content is an array or object and delegates
+    to the appropriate chunking function.
+    
+    Args:
+        content: JSON content to chunk.
+        target_size: Target chunk size in characters.
+        min_size: Minimum chunk size.
+        max_size: Maximum chunk size (hard limit).
+    
+    Returns:
+        Tuple of (chunk_metas, success) where:
+        - chunk_metas: List of chunk metadata dicts
+        - success: True if JSON parsing succeeded, False otherwise
+    """
+    # Handle minified JSON - try to detect structure from first non-whitespace char
+    stripped = content.strip()
+    
+    if not stripped:
+        return [], False
+    
+    if stripped.startswith('['):
+        return _chunk_json_array(content, target_size, min_size, max_size)
+    elif stripped.startswith('{'):
+        return _chunk_json_object(content, target_size, min_size, max_size)
+    else:
+        return [], False
+
+
 def _smart_chunk_impl(
     content: str,
     context_path: str,
@@ -883,7 +1239,9 @@ def _smart_chunk_impl(
     
     # Choose chunking strategy
     # Phase 6: Track whether codemap was used for manifest
+    # Phase 7: Track whether JSON chunking was used
     codemap_used = False
+    json_chunked = False
     
     if format_type == 'markdown':
         chunk_metas = _chunk_markdown(content, target_size, min_size, max_size)
@@ -894,8 +1252,17 @@ def _smart_chunk_impl(
             content, context_path, target_size, min_size, max_size
         )
         chunking_method = 'smart_code' if codemap_used else 'smart_text'
+    elif format_type == 'json':
+        # Phase 7: Use JSON-aware chunking for JSON files
+        chunk_metas, json_chunked = _chunk_json(
+            content, target_size, min_size, max_size
+        )
+        if not json_chunked:
+            # Fall back to text chunking if JSON parsing fails
+            chunk_metas = _chunk_text(content, target_size, min_size, max_size)
+        chunking_method = 'smart_json' if json_chunked else 'smart_text'
     else:
-        # For json, text - use text chunking
+        # For text - use text chunking
         chunk_metas = _chunk_text(content, target_size, min_size, max_size)
         chunking_method = 'smart_text'
     
@@ -905,14 +1272,25 @@ def _smart_chunk_impl(
     
     for i, meta in enumerate(chunk_metas):
         chunk_id = f"chunk_{i:04d}"
-        chunk_file = f"{chunk_id}.txt"
+        # Phase 7: Use .json extension for JSON chunks
+        chunk_file = f"{chunk_id}.json" if json_chunked else f"{chunk_id}.txt"
         chunk_path = out_dir / chunk_file
         
-        chunk_text = content[meta['start']:meta['end']]
+        # Phase 7: JSON chunks have pre-serialized content in json_content field
+        if 'json_content' in meta:
+            chunk_text = meta['json_content']
+        else:
+            chunk_text = content[meta['start']:meta['end']]
+        
         chunk_path.write_text(chunk_text, encoding=encoding)
         paths.append(str(chunk_path))
         
-        start_line, end_line = _count_lines_in_range(content, meta['start'], meta['end'])
+        # For JSON chunks, count lines in the serialized content
+        if 'json_content' in meta:
+            start_line = 1
+            end_line = chunk_text.count('\n') + 1
+        else:
+            start_line, end_line = _count_lines_in_range(content, meta['start'], meta['end'])
         
         chunk_entry = {
             'id': chunk_id,
@@ -924,6 +1302,14 @@ def _smart_chunk_impl(
             'split_reason': meta['split_reason'],
             'format': format_type,
         }
+        
+        # Phase 7: Add element_range for JSON arrays, key info for JSON objects
+        if 'element_range' in meta:
+            chunk_entry['element_range'] = meta['element_range']
+        if 'key_range' in meta:
+            chunk_entry['key_range'] = meta['key_range']
+        if 'keys' in meta:
+            chunk_entry['keys'] = meta['keys']
         
         # Add boundaries if present
         if meta.get('boundaries'):
@@ -944,6 +1330,7 @@ def _smart_chunk_impl(
         'chunking_method': chunking_method,
         'codemap_available': _detect_codemap() is not None,
         'codemap_used': codemap_used,
+        'json_chunked': json_chunked,  # Phase 7: Track JSON chunking
         'target_size': target_size,
         'min_size': min_size,
         'max_size': max_size,
@@ -1341,6 +1728,27 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
         handles_ref[handle] = data
         return _make_handle_stub(handle, data)
     
+    def _parse_handle(handle_input: str) -> str:
+        """Parse handle name from either '$res1' or '$res1: Array(20) [...]' format.
+        
+        This allows users to pass the full grep() return value directly to
+        count(), expand(), etc. without needing to call last_handle().
+        """
+        if not handle_input:
+            raise ValueError("Empty handle")
+        
+        # Already a clean handle name
+        if handle_input.startswith('$res') and ':' not in handle_input:
+            return handle_input
+        
+        # Parse from full stub format: "$res1: Array(20) [preview...]"
+        match = re.match(r'(\$res\d+):', handle_input)
+        if match:
+            return match.group(1)
+        
+        # Fallback: return as-is (will fail validation in caller)
+        return handle_input
+    
     # These close over context_ref/buffers_ref so changes persist.
     def peek(start: int = 0, end: int = 1000) -> str:
         content = context_ref.get("content", "")
@@ -1402,20 +1810,37 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
         return f"$res{state_ref['handle_counter']}"
     
     def expand(handle: str, limit: int = 10, offset: int = 0) -> List[Any]:
-        """Expand a handle to see its data (with optional pagination)."""
+        """Expand a handle to see its data (with optional pagination).
+        
+        Args:
+            handle: Handle name ('$res1') or full stub ('$res1: Array(20) [...]')
+            limit: Max items to return
+            offset: Start index for pagination
+        """
+        handle = _parse_handle(handle)
         if handle not in handles_ref:
             raise ValueError(f"Unknown handle: {handle}")
         data = handles_ref[handle]
         return data[offset:offset + limit]
     
     def count(handle: str) -> int:
-        """Get count of items in a handle without expanding."""
+        """Get count of items in a handle without expanding.
+        
+        Args:
+            handle: Handle name ('$res1') or full stub ('$res1: Array(20) [...]')
+        """
+        handle = _parse_handle(handle)
         if handle not in handles_ref:
             raise ValueError(f"Unknown handle: {handle}")
         return len(handles_ref[handle])
     
     def delete_handle(handle: str) -> str:
-        """Delete a handle to free memory."""
+        """Delete a handle to free memory.
+        
+        Args:
+            handle: Handle name ('$res1') or full stub ('$res1: Array(20) [...]')
+        """
+        handle = _parse_handle(handle)
         if handle not in handles_ref:
             return f"Handle {handle} not found."
         del handles_ref[handle]
@@ -1425,13 +1850,14 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
         """Filter handle data and return new handle.
         
         Args:
-            handle: Source handle (e.g., '$res1')
+            handle: Source handle ('$res1') or full stub ('$res1: Array(20) [...]')
             predicate: Either a regex pattern string (searches in 'snippet', 'line', or 'match' fields)
                       or a callable that takes an item and returns bool
         
         Returns:
             New handle stub with filtered results
         """
+        handle = _parse_handle(handle)
         if handle not in handles_ref:
             raise ValueError(f"Unknown handle: {handle}")
         
@@ -1458,12 +1884,13 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
         """Extract a single field from each item, return new handle.
         
         Args:
-            handle: Source handle
+            handle: Source handle ('$res1') or full stub ('$res1: Array(20) [...]')
             field: Field name to extract (e.g., 'match', 'line_num')
         
         Returns:
             New handle stub with extracted values
         """
+        handle = _parse_handle(handle)
         if handle not in handles_ref:
             raise ValueError(f"Unknown handle: {handle}")
         
@@ -1481,12 +1908,13 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
         """Sum numeric values in handle data.
         
         Args:
-            handle: Source handle
+            handle: Source handle ('$res1') or full stub ('$res1: Array(20) [...]')
             field: Optional field name. If None, sums items directly.
         
         Returns:
             Sum of numeric values
         """
+        handle = _parse_handle(handle)
         if handle not in handles_ref:
             raise ValueError(f"Unknown handle: {handle}")
         
@@ -1612,8 +2040,8 @@ def _make_helpers(context_ref: Dict[str, Any], buffers_ref: List[str], state_ref
         
         - **Markdown**: Splits at header boundaries (## and ###)
         - **Text**: Splits at paragraph breaks (double newlines)
-        - **Code**: Falls back to paragraph-based splitting (tree-sitter planned)
-        - **JSON**: Falls back to paragraph-based splitting
+        - **Code**: Splits at function/class boundaries (when codemap available)
+        - **JSON**: Splits arrays at element boundaries, objects at key boundaries
         
         Args:
             out_dir: Output directory for chunks.
