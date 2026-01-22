@@ -80,6 +80,22 @@ Tests the `llm_query()` and `llm_query_batch()` functions.
 - Query logging to `llm_queries.jsonl` works
 - `llm_query_batch()` function available with correct signature
 
+### 06_comparison.sh
+**Tests**: RLM vs static analysis (oxlint) comparison
+
+Compares pattern detection capabilities on the full Classroom-Connect-V2 codebase.
+
+**What it validates**:
+- RLM can find patterns that static analysis misses (hardcoded colors, inline JSX objects)
+- Static analysis finds things RLM pattern matching misses (type errors, unused imports)
+- Both can detect overlapping issues (console.log statements)
+- Complementary value of both approaches
+
+**Key Findings**:
+- Static analysis (oxlint): 245 issues across 6 rule categories
+- RLM patterns: 92 findings across 18 pattern categories
+- RLM unique finds: hardcoded colors (20), inline JSX objects (4), unhandled promises (20)
+
 ---
 
 ## UX Improvements Applied
@@ -154,6 +170,12 @@ print(f'Found {count(result)} matches')  # Just works!
 - ✅ Depth=0 rejection works with proper error message
 - ✅ Query logging to llm_queries.jsonl
 - ✅ llm_query_batch() has correct signature
+
+**Static Analysis Comparison** (584KB codebase):
+- oxlint: 245 issues (jsx-no-new-function-as-prop: 116, no-console: 97)
+- RLM: 92 findings (console.log: 20, hardcoded colors: 20, useEffect no deps: 7)
+- RLM unique: Hardcoded colors, inline JSX objects, unhandled promises
+- Static unique: Type errors, unused imports, complex control flow
 
 ---
 
