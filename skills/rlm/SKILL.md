@@ -16,6 +16,18 @@ Use this Skill when:
 - Persistent Python REPL (`rlm_repl.py`) = the external environment.
 - Subagent `rlm-subcall` = the sub-LM used like `llm_query`.
 
+## Core Features (RLM Paper Alignment)
+
+This implementation aligns with the [RLM paper](https://arxiv.org/abs/2512.24601) patterns:
+
+| Feature | Function | Description |
+|---------|----------|-------------|
+| **Inline LLM queries** | `llm_query(prompt)` | Sub-LLM calls from within Python code |
+| **Batch execution** | `llm_query_batch(prompts)` | Parallel sub-LLM invocation (max 5 concurrent) |
+| **Recursive depth** | `--max-depth N` | Sub-LLMs can spawn their own sub-LLMs |
+| **Smart chunking** | `smart_chunk(out_dir)` | Content-aware splitting (markdown/code/JSON) |
+| **Answer finalization** | `set_final_answer(value)` | Mark results for external retrieval |
+
 ## How to run
 
 ### Inputs
@@ -37,6 +49,13 @@ If the user didn't supply arguments, ask for:
    ```
    The output will show the session path (e.g., `.pi/rlm_state/myfile-20260120-155234/state.pkl`).
    Store this path mentally — use it for all subsequent `--state` arguments.
+
+   **Available init options:**
+   ```bash
+   python3 ~/skills/rlm/scripts/rlm_repl.py init <path> \
+       --max-depth 5 \                    # Set recursion limit (default: 3)
+       --preserve-recursive-state         # Keep sub-session directories for debugging
+   ```
 
    Check status:
    ```bash
@@ -62,6 +81,8 @@ If the user didn't supply arguments, ask for:
    ```
 
 3. **Materialize chunks as files** (so subagents can read them)
+
+   **Option A: Basic chunking (character-based)**
    ```bash
    python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec <<'PY'
    session_dir = state_path.parent  # available in env
@@ -72,20 +93,45 @@ If the user didn't supply arguments, ask for:
    PY
    ```
 
+   **Option B: Smart chunking (content-aware) ⭐ RECOMMENDED**
+   ```bash
+   python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec <<'PY'
+   session_dir = state_path.parent
+   paths = smart_chunk(
+       str(session_dir / 'chunks'),
+       target_size=200000,    # Target chars per chunk (soft limit)
+       min_size=50000,        # Minimum chunk size
+       max_size=400000,       # Maximum chunk size (hard limit)
+   )
+   print(f"Created {len(paths)} chunks")
+   PY
+   ```
+
+   Smart chunking auto-detects format and splits at natural boundaries:
+   - **Markdown**: Splits at header boundaries (## and ###)
+   - **Code**: Splits at function/class boundaries (requires codemap)
+   - **JSON**: Splits arrays into element groups, objects by keys
+   - **Text**: Splits at paragraph breaks
+
    After chunking, **read the manifest** to understand chunk coverage:
    ```bash
    cat <session_dir>/chunks/manifest.json
    ```
    
-   The manifest now includes:
+   The manifest includes:
+   - `format`: Detected content type (markdown, code, json, text)
+   - `chunking_method`: Method used (smart_markdown, smart_code, smart_json, smart_text)
    - `preview`: First few lines of each chunk
    - `hints`: Content analysis (e.g., `likely_code`, `section_headers`, `density`)
+   - `boundaries`: Header/symbol boundaries for each chunk
    
    Use hints to skip irrelevant chunks or craft better prompts.
 
-4. **Subcall loop — use parallel mode**
+4. **Query sub-LLMs** (multiple options)
+
+   **Option A: Use subagent delegation (parallel mode)**
    
-   **Always use parallel invocation** for speed. The `rlm-subcall` agent has `full-output: true` configured, so parallel mode returns complete results (not truncated previews).
+   Use `rlm-subcall` agent with parallel invocation for speed:
 
    ```json
    {
@@ -97,17 +143,84 @@ If the user didn't supply arguments, ask for:
    }
    ```
 
-   The subagents will read their entire chunk (they exist to burn context) and return structured JSON.
-
-   Optionally accumulate results using `add_buffer()`:
+   **Option B: Use inline `llm_query()` (single query)**
    ```bash
-   python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec -c "add_buffer('<subagent result>')"
+   python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec -c "
+   chunk_path = session_dir / 'chunks' / 'chunk_0000.txt'
+   result = llm_query(f'Summarize: {chunk_path.read_text()[:50000]}')
+   print(result)
+   add_buffer(result)
+   "
    ```
 
-5. **Synthesis**
+   **Option C: Use `llm_query_batch()` (parallel queries)**
+   ```bash
+   python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec <<'PY'
+   # Read all chunks
+   chunk_dir = session_dir / 'chunks'
+   chunk_files = sorted(chunk_dir.glob('chunk_*.txt'))
+   
+   # Build prompts
+   prompts = []
+   for chunk_file in chunk_files:
+       content = chunk_file.read_text()[:50000]
+       prompts.append(f"Find all TODOs in this code:\n{content}")
+   
+   # Run in parallel (max 5 concurrent)
+   results, failures = llm_query_batch(
+       prompts,
+       concurrency=5,    # Max concurrent queries
+       max_retries=3,    # Retry failures with exponential backoff
+   )
+   
+   print(f"Got {len(results)} results, {len(failures)} failures")
+   for i, result in enumerate(results):
+       if "[ERROR:" not in result:
+           add_buffer(f"Chunk {i}: {result}")
+   PY
+   ```
+
+5. **Set final answer** (for external retrieval)
+   ```bash
+   python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec -c "
+   # Compile results
+   final_result = {
+       'summary': 'Found 15 issues across 4 files',
+       'issues': [...]  # Must be JSON-serializable
+   }
+   set_final_answer(final_result)
+   "
+
+   # Retrieve from CLI
+   python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> get-final-answer
+   ```
+
+6. **Synthesis**
    - Once enough evidence is collected, synthesize the final answer in the main conversation.
    - Use the manifest to cite specific locations (line numbers, character positions).
    - Optionally invoke rlm-subcall once more to merge collected buffers into a coherent draft.
+
+## Recursive Depth Diagram
+
+```
+                    Root LM (depth=3)
+                         │
+        ┌────────────────┴────────────────┐
+        │                                 │
+   llm_query(A)                    llm_query(B)
+   Sub-LM (depth=2)                Sub-LM (depth=2)
+        │                                 │
+   llm_query(C)                    llm_query(D)
+   Sub-LM (depth=1)                Sub-LM (depth=1)
+        │                                 │
+   llm_query(E)                    llm_query(F)
+   [ERROR: depth limit]            [ERROR: depth limit]
+```
+
+- Each level decrements `remaining_depth` by 1
+- At depth 0, queries return error without spawning
+- Use `--max-depth N` at init to adjust the limit
+- Use `--preserve-recursive-state` to keep sub-session directories for debugging
 
 ## REPL Helpers Reference
 
@@ -119,7 +232,21 @@ If the user didn't supply arguments, ask for:
 | `grep_raw(pattern, ...)` | `list[dict]` | Same as grep but returns raw data |
 | `chunk_indices(size, overlap)` | `list[tuple]` | Get chunk boundary positions |
 | `write_chunks(out_dir, size, overlap)` | `list[str]` | Write chunks to disk with manifest |
+| `smart_chunk(out_dir, target, min, max)` | `list[str]` | Content-aware chunking ⭐ |
 | `add_buffer(text)` | `None` | Accumulate text for later synthesis |
+
+### LLM Query Functions
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `llm_query(prompt, cleanup=True)` | `str` | Single sub-LLM query |
+| `llm_query_batch(prompts, concurrency=5, max_retries=3)` | `(list, dict)` | Parallel queries with retry |
+
+### Answer Finalization
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `set_final_answer(value)` | `None` | Mark JSON-serializable value as final |
+| `has_final_answer()` | `bool` | Check if final answer is set |
+| `get_final_answer()` | `Any` | Retrieve the final answer value |
 
 ### Handle System (Token-Efficient)
 | Function | Returns | Description |
@@ -133,22 +260,51 @@ If the user didn't supply arguments, ask for:
 | `map_field(handle, field)` | `str` (handle) | Extract field from each item |
 | `sum_field(handle, field)` | `float` | Sum numeric field values |
 
+**Note**: All handle functions accept both handle names (`$res1`) and full stubs (`$res1: Array(47) [...]`).
+
 ### Handle Workflow Example
 ```python
-# Search returns handle, not data
-print(grep("ERROR"))             # "$res1: Array(47) [preview...]"
+# Search returns handle stub
+result = grep("ERROR")           # "$res1: Array(47) [preview...]"
 
-# Chain with last_handle()
-map_field(last_handle(), "line_num")
-print(expand(last_handle()))     # [10, 45, 89, ...]
+# Use result directly - no need for last_handle()!
+print(f"Found {count(result)} errors")  # 47
+for item in expand(result, limit=5):
+    print(item['snippet'])
 
 # Or use handle names directly
-result = grep("ERROR")           # "$res1: Array(47) [...]"
 print(count("$res1"))            # 47
 
-# Filter server-side
-filter_handle("$res1", "timeout")
-print(f"Timeout errors: {count(last_handle())}")
+# Filter and chain
+filtered = filter_handle(result, "timeout")
+print(f"Timeout errors: {count(filtered)}")
+
+# Map to extract specific fields
+line_nums = map_field(result, "line_num")
+print(expand(line_nums))         # [10, 45, 89, ...]
+```
+
+## CLI Commands Reference
+
+```bash
+# Initialize a session
+python3 rlm_repl.py init <context_path> [--max-depth N] [--preserve-recursive-state]
+
+# Check session status
+python3 rlm_repl.py --state <path> status
+
+# Execute Python code
+python3 rlm_repl.py --state <path> exec -c "code..."
+python3 rlm_repl.py --state <path> exec < script.py
+
+# Reset session (clear buffers, handles)
+python3 rlm_repl.py --state <path> reset
+
+# Export accumulated buffers
+python3 rlm_repl.py --state <path> export-buffers
+
+# Get final answer as JSON
+python3 rlm_repl.py --state <path> get-final-answer
 ```
 
 ## Guardrails
@@ -159,3 +315,13 @@ print(f"Timeout errors: {count(last_handle())}")
 - Subagents cannot spawn other subagents. Any orchestration stays in the main conversation.
 - Keep scratch/state files under `.pi/rlm_state/`.
 - Always use absolute paths when invoking subagents.
+- `llm_query_batch()` is limited to 5 concurrent queries (global semaphore).
+- `set_final_answer()` only accepts JSON-serializable values.
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `RLM_STATE_DIR` | Override default state directory (`.pi/rlm_state`) |
+| `RLM_REMAINING_DEPTH` | Set by parent LLM for sub-agents |
+| `RLM_CODEMAP_PATH` | Explicit path to codemap binary for code chunking |
