@@ -58,7 +58,7 @@ Review the RLM implementation to assess alignment with the academic paper. The i
 ### Documentation
 | File | Purpose |
 |------|---------|
-| `skills/rlm/docs/TESTING-STRATEGY.md` | Testing approach and results |
+| `devdocs/rlm-alignment/TESTING-STRATEGY.md` | Testing approach and results |
 | `skills/rlm/examples/` | Usage examples (5 scripts) |
 
 ---
