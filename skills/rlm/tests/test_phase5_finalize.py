@@ -44,8 +44,8 @@ class TestSetFinalAnswer:
         state = pickle.load(open(state_path, "rb"))
         set_at = state["final_answer"]["set_at"]
         assert set_at is not None
-        # Should be ISO 8601 format with Z suffix
-        assert set_at.endswith("Z")
+        # Should be ISO 8601 format with UTC timezone
+        assert set_at.endswith("+00:00") or set_at.endswith("Z")
         # Should be parseable
         datetime.fromisoformat(set_at.replace("Z", "+00:00"))
 
@@ -283,7 +283,7 @@ class TestGetFinalAnswerCLI:
         )
         
         data = json.loads(result.stdout)
-        assert data["set_at"].endswith("Z")
+        assert data["set_at"].endswith("+00:00") or data["set_at"].endswith("Z")
 
 
 class TestStatusCommandFinalAnswer:

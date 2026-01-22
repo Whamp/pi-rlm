@@ -18,12 +18,20 @@ SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from rlm_repl import (
-    _chunk_json_array,
-    _chunk_json_object,
     _chunk_json,
     _smart_chunk_impl,
     _detect_format,
 )
+
+# Helper to call _chunk_json for arrays
+def _chunk_json_array(content, target_size, min_size, max_size):
+    """Wrapper for backward compatibility with tests."""
+    return _chunk_json(content, target_size, min_size, max_size)
+
+# Helper to call _chunk_json for objects
+def _chunk_json_object(content, target_size, min_size, max_size):
+    """Wrapper for backward compatibility with tests."""
+    return _chunk_json(content, target_size, min_size, max_size)
 
 
 class TestChunkJsonArray:
@@ -104,12 +112,13 @@ class TestChunkJsonArray:
         assert success is False
         assert chunks == []
     
-    def test_non_array_returns_failure(self):
-        """Non-array JSON returns empty list and failure."""
+    def test_non_array_returns_success_as_object(self):
+        """Non-array JSON (object) is handled by unified _chunk_json."""
         content = '{"key": "value"}'
         chunks, success = _chunk_json_array(content, 100, 10, 200)
-        assert success is False
-        assert chunks == []
+        # Unified _chunk_json handles both arrays and objects
+        assert success is True
+        assert len(chunks) == 1
     
     def test_split_reasons(self):
         """Chunks have appropriate split_reason values."""
@@ -225,12 +234,13 @@ class TestChunkJsonObject:
         assert success is False
         assert chunks == []
     
-    def test_non_object_returns_failure(self):
-        """Non-object JSON returns empty list and failure."""
+    def test_non_object_returns_success_as_array(self):
+        """Non-object JSON (array) is handled by unified _chunk_json."""
         content = '[1, 2, 3]'
         chunks, success = _chunk_json_object(content, 100, 10, 200)
-        assert success is False
-        assert chunks == []
+        # Unified _chunk_json handles both arrays and objects
+        assert success is True
+        assert len(chunks) == 1
     
     def test_split_reasons(self):
         """Chunks have appropriate split_reason values."""

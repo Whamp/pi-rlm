@@ -24,7 +24,7 @@ from rlm_repl import (
     _parse_pi_json_output,
     _log_query,
     _spawn_sub_agent,
-    _migrate_state_v2_to_v3,
+    _load_state,
     DEFAULT_MAX_DEPTH,
 )
 
@@ -230,18 +230,22 @@ class TestSpawnSubAgent:
 
 
 class TestStateMigration:
-    """Unit tests for state version migration."""
+    """Unit tests for state version migration (via _load_state)."""
     
-    def test_v2_to_v3_adds_depth_fields(self):
-        """V2 state gets depth tracking fields."""
+    def test_v2_to_v3_adds_depth_fields(self, tmp_path):
+        """V2 state gets depth tracking fields when loaded."""
+        import pickle
         v2_state = {
             "version": 2,
             "context": {"content": "test"},
             "buffers": [],
             "handles": {},
         }
+        state_path = tmp_path / "state.pkl"
+        with open(state_path, "wb") as f:
+            pickle.dump(v2_state, f)
         
-        v3_state = _migrate_state_v2_to_v3(v2_state)
+        v3_state = _load_state(state_path)
         
         assert v3_state["version"] == 3
         assert v3_state["max_depth"] == DEFAULT_MAX_DEPTH
@@ -249,29 +253,38 @@ class TestStateMigration:
         assert v3_state["preserve_recursive_state"] == False
         assert v3_state["final_answer"] is None
     
-    def test_v3_unchanged(self):
+    def test_v3_unchanged(self, tmp_path):
         """V3 state passes through unchanged."""
+        import pickle
         v3_state = {
             "version": 3,
+            "context": {"content": "test"},
             "max_depth": 5,
             "remaining_depth": 2,
             "preserve_recursive_state": True,
             "final_answer": {"value": 42},
         }
+        state_path = tmp_path / "state.pkl"
+        with open(state_path, "wb") as f:
+            pickle.dump(v3_state, f)
         
-        result = _migrate_state_v2_to_v3(v3_state)
+        result = _load_state(state_path)
         
         assert result["max_depth"] == 5  # Not overwritten
         assert result["remaining_depth"] == 2
         assert result["preserve_recursive_state"] == True
     
-    def test_v1_state_migrated(self):
+    def test_v1_state_migrated(self, tmp_path):
         """V1 state (no version) gets migrated."""
+        import pickle
         v1_state = {
             "context": {"content": "old"},
         }
+        state_path = tmp_path / "state.pkl"
+        with open(state_path, "wb") as f:
+            pickle.dump(v1_state, f)
         
-        v3_state = _migrate_state_v2_to_v3(v1_state)
+        v3_state = _load_state(state_path)
         
         assert v3_state["version"] == 3
         assert "max_depth" in v3_state

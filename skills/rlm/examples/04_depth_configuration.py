@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Example: Depth configuration and recursive state.
+"""Example: Depth configuration (advanced).
+
+Depth controls how many levels of llm_query() nesting are allowed.
+This is mostly an implementation detail - the default of 3 works for most cases.
 
 This example demonstrates:
-- --max-depth for controlling recursion limit
+- Default depth behavior
+- Custom depth with --max-depth
 - --preserve-recursive-state for debugging
-- How depth affects llm_query behavior
 
 Run from the skills/rlm directory:
     python3 examples/04_depth_configuration.py
 """
 
-import pickle
 import subprocess
 import sys
 import tempfile
@@ -30,33 +32,27 @@ def main():
         tmpdir = Path(tmpdir)
 
         print("=" * 60)
-        print("Example 4: Depth Configuration")
+        print("Example 4: Depth Configuration (Advanced)")
         print("=" * 60)
+        print("\nDepth limits how many nested llm_query() calls are allowed.")
+        print("Default is 3, which is sufficient for most workflows.\n")
 
         content_file = tmpdir / "content.txt"
         content_file.write_text("Test content for depth examples")
 
         # --- Default depth ---
-        print("\n" + "-" * 40)
-        print("[1] Default depth (3)")
+        print("-" * 40)
+        print("[1] Default initialization")
         print("-" * 40)
 
         stdout, stderr, code = run_cmd(
             ["python3", str(RLM_REPL), "init", str(content_file)],
             tmpdir
         )
-        
-        for line in stdout.splitlines():
-            if "Session path:" in line:
-                state_path = tmpdir / line.split(":", 1)[1].strip()
-                break
-        
-        state = pickle.load(open(state_path, 'rb'))
-        print(f"max_depth: {state['max_depth']}")
-        print(f"remaining_depth: {state['remaining_depth']}")
+        print(stdout)
 
         # --- Custom depth ---
-        print("\n" + "-" * 40)
+        print("-" * 40)
         print("[2] Custom depth (--max-depth 5)")
         print("-" * 40)
 
@@ -64,38 +60,24 @@ def main():
             ["python3", str(RLM_REPL), "init", str(content_file), "--max-depth", "5"],
             tmpdir
         )
-        
-        for line in stdout.splitlines():
-            if "Session path:" in line:
-                state_path = tmpdir / line.split(":", 1)[1].strip()
-                break
-        
-        state = pickle.load(open(state_path, 'rb'))
-        print(f"max_depth: {state['max_depth']}")
-        print(f"remaining_depth: {state['remaining_depth']}")
+        print(stdout)
 
-        # --- Preserve recursive state ---
-        print("\n" + "-" * 40)
-        print("[3] Preserve recursive state flag")
+        # --- Preserve recursive state (for debugging) ---
+        print("-" * 40)
+        print("[3] Preserve sub-session state for debugging")
         print("-" * 40)
 
         stdout, stderr, code = run_cmd(
             ["python3", str(RLM_REPL), "init", str(content_file), "--preserve-recursive-state"],
             tmpdir
         )
-        
-        for line in stdout.splitlines():
-            if "Session path:" in line:
-                state_path = tmpdir / line.split(":", 1)[1].strip()
-                break
-        
-        state = pickle.load(open(state_path, 'rb'))
-        print(f"preserve_recursive_state: {state['preserve_recursive_state']}")
-        print("(Sub-session directories will be kept for debugging)")
+        print(stdout)
+        print("With --preserve-recursive-state, sub-query session dirs are kept")
+        print("for debugging instead of being cleaned up automatically.")
 
-        # --- Depth 0 behavior ---
+        # --- Depth 0 prevents LLM calls ---
         print("\n" + "-" * 40)
-        print("[4] Depth 0: llm_query returns error")
+        print("[4] Depth 0 prevents llm_query()")
         print("-" * 40)
 
         stdout, stderr, code = run_cmd(
@@ -103,42 +85,21 @@ def main():
             tmpdir
         )
         
+        state_path = None
         for line in stdout.splitlines():
             if "Session path:" in line:
                 state_path = tmpdir / line.split(":", 1)[1].strip()
                 break
 
-        result = subprocess.run(
-            ["python3", str(RLM_REPL), "--state", str(state_path), "exec", "-c",
-             "result = llm_query('test'); print(result)"],
-            capture_output=True, text=True, cwd=tmpdir
-        )
-        print(f"llm_query result at depth 0:")
-        print(f"  {result.stdout.strip()}")
-
-        # --- Status shows depth ---
-        print("\n" + "-" * 40)
-        print("[5] Status command shows depth info")
-        print("-" * 40)
-
-        stdout, stderr, code = run_cmd(
-            ["python3", str(RLM_REPL), "init", str(content_file), "--max-depth", "4"],
-            tmpdir
-        )
-        
-        for line in stdout.splitlines():
-            if "Session path:" in line:
-                state_path = tmpdir / line.split(":", 1)[1].strip()
-                break
-
-        stdout, stderr, code = run_cmd(
-            ["python3", str(RLM_REPL), "--state", str(state_path), "status"],
-            tmpdir
-        )
-        # Extract depth-related lines
-        for line in stdout.splitlines():
-            if "depth" in line.lower():
-                print(line)
+        if state_path:
+            result = subprocess.run(
+                ["python3", str(RLM_REPL), "--state", str(state_path), "exec", "-c",
+                 "result = llm_query('test'); print(result)"],
+                capture_output=True, text=True, cwd=tmpdir
+            )
+            print(f"llm_query() at depth 0 returns:")
+            print(f"  {result.stdout.strip()}")
+            print("\nThis is useful when you want REPL-only analysis (Level 1).")
 
         print("\n" + "=" * 60)
         print("Example completed!")
