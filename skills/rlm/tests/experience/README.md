@@ -9,6 +9,8 @@ Practical tests for validating the RLM (Recursive Language Model) implementation
 cd ~/projects/pi-rlm
 ./skills/rlm/tests/experience/01_needle_haystack.sh
 ./skills/rlm/tests/experience/02_codebase_analysis.sh
+./skills/rlm/tests/experience/03_smart_markdown.sh
+./skills/rlm/tests/experience/04_smart_json.sh
 ```
 
 ## Available Tests
@@ -41,6 +43,29 @@ Analyzes Classroom-Connect-V2 (a ~40K line TypeScript codebase) for common patte
 - Multiple grep operations in sequence
 - Handle chaining with `last_handle()`
 - Smart code chunking
+
+### 03_smart_markdown.sh
+**Tests**: Markdown document chunking at header boundaries
+
+Creates a ~80KB structured markdown document with chapters and sections.
+
+**What it validates**:
+- Format detected as `markdown`
+- Chunking method is `smart_markdown`
+- Each chunk starts at a header boundary
+- Headers are recorded in manifest boundaries
+
+### 04_smart_json.sh
+**Tests**: JSON array and object chunking at element/key boundaries
+
+Creates test JSON files (~190KB array, ~250KB object).
+
+**What it validates**:
+- Format detected as `json`
+- Chunking method is `smart_json`
+- Each chunk is independently parseable JSON
+- Element ranges (arrays) and key ranges (objects) are contiguous
+- All elements/keys are covered across chunks
 
 ---
 
@@ -100,6 +125,16 @@ print(f'Found {count(result)} matches')  # Just works!
 - Services layer (66KB): Found 20 Supabase queries, 12 error handlers, 5 try-catch blocks
 - Components (78KB): Found 5 useState, 18 custom hooks, 20 event handlers
 - Chunking: Code detected, 1 chunk (fell back to smart_text)
+
+**Smart Markdown Chunking** (84KB):
+- ✅ Format detected: markdown
+- ✅ Chunking method: smart_markdown
+- ✅ 3 chunks created, each starting at header boundary
+- Chunk boundaries: "Main Document Title", "5.2 Subtopic B", "8.3 Subtopic C"
+
+**Smart JSON Chunking**:
+- Array (189KB): ✅ 7 chunks, all valid JSON arrays, elements [0-29] through [174-200]
+- Object (246KB): ✅ 9 chunks, all valid JSON objects, 50 total keys covered
 
 ---
 
