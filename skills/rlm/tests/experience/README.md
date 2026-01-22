@@ -67,6 +67,19 @@ Creates test JSON files (~190KB array, ~250KB object).
 - Element ranges (arrays) and key ranges (objects) are contiguous
 - All elements/keys are covered across chunks
 
+### 05_llm_query.sh
+**Tests**: LLM query integration (single and batch)
+
+Tests the `llm_query()` and `llm_query_batch()` functions.
+
+**What it validates**:
+- Session initialization with `--max-depth` flag
+- Status command shows depth info correctly
+- `llm_query()` executes and returns response (or parse error)
+- Depth=0 correctly rejects with depth limit error message
+- Query logging to `llm_queries.jsonl` works
+- `llm_query_batch()` function available with correct signature
+
 ---
 
 ## UX Improvements Applied
@@ -135,6 +148,12 @@ print(f'Found {count(result)} matches')  # Just works!
 **Smart JSON Chunking**:
 - Array (189KB): ✅ 7 chunks, all valid JSON arrays, elements [0-29] through [174-200]
 - Object (246KB): ✅ 9 chunks, all valid JSON objects, 50 total keys covered
+
+**LLM Query Integration**:
+- ✅ Status shows depth info (max_depth=2, remaining_depth=2)
+- ✅ Depth=0 rejection works with proper error message
+- ✅ Query logging to llm_queries.jsonl
+- ✅ llm_query_batch() has correct signature
 
 ---
 

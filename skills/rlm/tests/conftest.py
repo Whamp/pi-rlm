@@ -56,11 +56,17 @@ def init_session(tmp_path, rlm_repl_path):
     """
     created_paths = []
     
-    def _init(content: str, **kwargs) -> Path:
+    def _init(content: str, extra_args: list = None, **kwargs) -> Path:
         test_file = tmp_path / "test_context.txt"
         test_file.write_text(content)
         
         cmd = ["python3", str(rlm_repl_path), "init", str(test_file)]
+        
+        # Add extra_args if provided (for things like --max-depth 0)
+        if extra_args:
+            cmd.extend(extra_args)
+        
+        # Add kwargs as --key value pairs
         for key, value in kwargs.items():
             cmd.extend([f"--{key.replace('_', '-')}", str(value)])
         

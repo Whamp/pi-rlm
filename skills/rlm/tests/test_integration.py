@@ -782,3 +782,76 @@ set_final_answer({'sections_found': 100, 'method': 'smart_markdown'})
 print('Done')
 """)
         assert code == 0
+
+
+class TestLLMQueryIntegration:
+    """Tests for llm_query() and llm_query_batch() integration."""
+
+    def test_llm_query_depth_zero_rejection(self, init_session, run_exec):
+        """llm_query() returns error when depth is exhausted."""
+        # Create session with max_depth=0
+        content = "Test content"
+        state_path = init_session(content, extra_args=["--max-depth", "0"])
+
+        stdout, stderr, code = run_exec(state_path, """
+result = llm_query("Test prompt")
+print(f"Result: {result}")
+assert "depth limit" in result.lower() or "recursion" in result.lower()
+print("PASS: Depth limit enforced")
+""")
+        assert code == 0, f"stderr: {stderr}"
+        assert "PASS" in stdout or "depth limit" in stdout.lower()
+
+    def test_llm_query_logs_to_jsonl(self, init_session, run_exec):
+        """llm_query() logs queries to llm_queries.jsonl."""
+        content = "Test content"
+        # Use depth=0 so query fails fast without spawning subprocess
+        state_path = init_session(content, extra_args=["--max-depth", "0"])
+        session_dir = state_path.parent
+
+        # Make a query (will fail due to depth)
+        run_exec(state_path, 'llm_query("Test")')
+
+        # Check log exists
+        log_file = session_dir / "llm_queries.jsonl"
+        assert log_file.exists(), "Log file should exist"
+        
+        # Parse log entry
+        entries = [json.loads(line) for line in log_file.read_text().strip().split("\n") if line]
+        assert len(entries) >= 1, "Should have at least one log entry"
+        
+        entry = entries[0]
+        assert "query_id" in entry
+        assert "timestamp" in entry
+        assert "status" in entry
+        assert entry["status"] == "depth_exceeded"
+
+    def test_llm_query_batch_available(self, init_session, run_exec):
+        """llm_query_batch() is available and has correct signature."""
+        state_path = init_session("Test")
+
+        stdout, stderr, code = run_exec(state_path, """
+import inspect
+sig = inspect.signature(llm_query_batch)
+params = list(sig.parameters.keys())
+expected = ['prompts', 'concurrency', 'max_retries', 'cleanup']
+assert params == expected, f"Got {params}, expected {expected}"
+print("PASS: llm_query_batch has correct signature")
+""")
+        assert code == 0, f"stderr: {stderr}"
+        assert "PASS" in stdout
+
+    def test_depth_passed_through_status(self, init_session, run_exec):
+        """Session status shows correct depth configuration."""
+        content = "Test"
+        state_path = init_session(content, extra_args=["--max-depth", "5"])
+
+        # Check via status command
+        import subprocess
+        result = subprocess.run(
+            ["python3", str(Path(__file__).parent.parent / "scripts" / "rlm_repl.py"),
+             "--state", str(state_path), "status"],
+            capture_output=True, text=True
+        )
+        assert "Max depth: 5" in result.stdout
+        assert "Remaining depth: 5" in result.stdout
