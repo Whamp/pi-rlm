@@ -62,25 +62,45 @@ If the user didn't supply arguments, ask for:
    python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> status
    ```
 
-2. **Scout the content (optional but recommended)**
-   
-   Use the handle-based search to explore without flooding your context:
-   ```bash
-   python3 ~/skills/rlm/scripts/rlm_repl.py --state <session_state_path> exec -c "
-   # grep() returns a handle stub, not raw data
-   result = grep('ERROR')
-   print(result)  # e.g., '\$res1: Array(47) [preview...]'
-   
-   # Inspect without expanding
-   print(f'Found {count(\"\$res1\")} matches')
-   
-   # Expand only what you need
-   for item in expand('\$res1', limit=5):
-       print(f\"Line {item['line_num']}: {item['match']}\")
-   "
-   ```
+2. **Choose an Exploration Strategy**
 
-3. **Materialize chunks as files** (so subagents can read them)
+   **Strategy A: Search & Extract (Targeted)**
+   *Best when you know what you're looking for (e.g., "find all errors", "check auth logic").*
+   
+   1. Search using `grep`:
+      ```bash
+      python3 ~/skills/rlm/scripts/rlm_repl.py --state <path> exec -c "
+      hits = grep('auth_middleware')
+      print(f'Found {count(hits)} matches')
+      "
+      ```
+   2. Expand relevant matches to verify context:
+      ```bash
+      python3 ~/skills/rlm/scripts/rlm_repl.py --state <path> exec -c "
+      for item in expand(last_handle(), limit=3):
+          print(item['snippet'])
+      "
+      ```
+
+   **Strategy B: Filtered Scan (Efficient)**
+   *Best for broad understanding of specific sections (e.g., "read all markdown files", "check only test files").*
+   
+   1. Generate smart chunks:
+      ```bash
+      python3 ~/skills/rlm/scripts/rlm_repl.py --state <path> exec -c "
+      smart_chunk(str(state_path.parent / 'chunks'))
+      "
+      ```
+   2. Read manifest hints to select relevant chunks (e.g., `likely_code=true`).
+   3. Dispatch subagents ONLY for selected chunks.
+
+   **Strategy C: Full Scan (Comprehensive)**
+   *Best for summaries or when information is scattered everywhere.*
+   
+   1. Generate smart chunks.
+   2. Dispatch subagents for ALL chunks (batched).
+
+3. **Materialize Chunks (for Strategies B & C)**
 
    **Option A: Basic chunking (character-based)**
    ```bash
@@ -131,17 +151,23 @@ If the user didn't supply arguments, ask for:
 
    **Option A: Use subagent delegation (parallel mode)**
    
-   Use `rlm-subcall` agent with parallel invocation for speed:
+   Use `rlm-subcall` agent with parallel invocation for speed.
+   
+   **⚠️ LIMIT: Maximum 8 parallel tasks per subagent call.** For more chunks, batch into groups of 8:
 
    ```json
    {
      "tasks": [
        {"agent": "rlm-subcall", "task": "Query: <user query>\nChunk file: <absolute path to chunk_0000.txt>"},
        {"agent": "rlm-subcall", "task": "Query: <user query>\nChunk file: <absolute path to chunk_0001.txt>"},
-       ...
+       ... (max 8 per call)
      ]
    }
    ```
+   
+   For >8 chunks, make multiple sequential subagent calls.
+
+   **Note:** The `rlm-subcall` agent uses a special `read_chunk` tool that reads the entire file without defensive truncation. Trust it to read the full context.
 
    **Option B: Use inline `llm_query()` (single query)**
    ```bash
