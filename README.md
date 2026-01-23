@@ -14,23 +14,38 @@ This skill requires the **subagent tool** for pi. The subagent tool is included 
 
 ## What is RLM?
 
-The Recursive Language Model pattern breaks down large documents into manageable chunks, processes each with a specialized sub-LLM, then synthesizes results in the main agent. This allows you to analyze textbooks, massive documentation, log dumps, or any context too large to paste into chat.
+The Recursive Language Model pattern breaks down large documents into manageable chunks, processes each with a specialized sub-LLM, then synthesizes results. This allows you to analyze textbooks, massive documentation, log dumps, or any context too large to paste into chat.
+
+### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Pi Main Session (Root LLM)                   │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-            ┌──────────────┴──────────────┐
-            ▼                             ▼
-┌───────────────────────┐     ┌───────────────────────────────────┐
-│   rlm_repl.py         │     │        rlm-subcall                 │
-│   (Persistent REPL)   │     │        (Sub-LLM Agent)             │
-│ • Load large context  │     │ • Reads individual chunks         │
-│ • Chunk text          │     │ • Extracts relevant info          │
-│ • Search/grep         │     │ • Returns structured JSON         │
-│ • Accumulate results  │     │                                   │
-└───────────────────────┘     └───────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Pi Main Session (Root LLM)                           │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+          ┌───────────────────────┴───────────────────────┐
+          ▼                                               ▼
+┌─────────────────────────┐                 ┌─────────────────────────────────┐
+│   Agent-Driven Mode     │                 │      Autonomous Mode            │
+│   (/skill:rlm)          │                 │      (rlm-autonomous)           │
+│                         │                 │                                 │
+│ • Agent drives REPL     │                 │ • Subagent drives REPL          │
+│ • Sees each iteration   │                 │ • Runs complete loop internally │
+│ • Can adapt approach    │                 │ • Returns only final answer     │
+│ • Uses main context     │                 │ • Isolates main context         │
+└───────────┬─────────────┘                 └───────────────┬─────────────────┘
+            │                                               │
+            ▼                                               ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          rlm_repl.py (Persistent REPL)                      │
+│  • Load large context  • Search/grep  • Chunk text  • Accumulate results   │
+└─────────────────────────────────────────┬───────────────────────────────────┘
+                                          │
+                                          ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Sub-LLM Queries (llm_query / rlm-subcall)                │
+│           • Semantic analysis  • ~500K char capacity  • Parallel batching  │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Installation
@@ -44,8 +59,9 @@ git clone https://github.com/Whamp/pi-rlm.git ~/projects/pi-rlm
 # Symlink the skill (includes the read_chunk extension)
 ln -s ~/projects/pi-rlm/skills/rlm ~/skills/rlm
 
-# Symlink the agent
+# Symlink the agents
 ln -s ~/projects/pi-rlm/agents/rlm-subcall.md ~/.pi/agent/agents/rlm-subcall.md
+ln -s ~/projects/pi-rlm/agents/rlm-autonomous.md ~/.pi/agent/agents/rlm-autonomous.md
 ```
 
 ### Option 2: Copy files
@@ -57,25 +73,44 @@ git clone https://github.com/Whamp/pi-rlm.git /tmp/pi-rlm
 # Copy the skill (includes the read_chunk extension)
 cp -r /tmp/pi-rlm/skills/rlm ~/skills/
 
-# Copy the agent
+# Copy the agents
 cp /tmp/pi-rlm/agents/rlm-subcall.md ~/.pi/agent/agents/
+cp /tmp/pi-rlm/agents/rlm-autonomous.md ~/.pi/agent/agents/
 ```
 
 > **Note:** The `read_chunk` tool (used by the rlm-subcall agent to read large chunks without truncation) is bundled with the skill at `skills/rlm/extensions/rlm_tools.ts`. The agent automatically loads this extension when spawned—no manual extension installation required.
 
-## Usage
+## Usage Modes
 
-Invoke the skill with a context file and query:
+pi-rlm provides two modes for different context sizes:
+
+### Agent-Driven Mode (Medium-Large Files)
+
+For files where you want the main agent to steer the analysis:
 
 ```
 /skill:rlm context=path/to/large-file.txt query="What patterns appear in this document?"
 ```
 
-Or start the skill and it will prompt you:
+The main agent drives the REPL, sees intermediate results, and can adapt its approach. Best for files up to ~10MB where interactive exploration adds value.
 
+### Autonomous Mode (Massive Files)
+
+For very large files where you want complete context isolation:
+
+```json
+{
+  "agent": "rlm-autonomous",
+  "task": "File: /path/to/huge-log.txt\nQuery: Find all security errors and classify by severity"
+}
 ```
-/skill:rlm
-```
+
+The subagent handles the entire analysis loop internally. The main agent only sees the final answer. Best for files >10MB or when you need to analyze many large files in one session.
+
+| Mode | Context Cost | Agent Control | Best For |
+|------|--------------|---------------|----------|
+| Agent-driven (`/skill:rlm`) | Proportional to iterations | Full steering | <10MB, interactive exploration |
+| Autonomous (`rlm-autonomous`) | Fixed (~task + answer) | None during analysis | >10MB, batch processing |
 
 ## How It Works
 
