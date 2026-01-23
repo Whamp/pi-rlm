@@ -1,6 +1,6 @@
 # pi-rlm Development History
 
-> This document was generated using pi-rlm itself to analyze 23MB of development session logs spanning 28 sessions over 2 days.
+> This document was generated using pi-rlm itself to analyze 25MB of development session logs spanning 36 sessions over 2 days.
 
 ## Executive Summary
 
@@ -14,6 +14,7 @@
 |------|----------|-------|
 | 2026-01-21 | 1-15 | Codemap exploration → Paper study → 8-phase implementation |
 | 2026-01-22 | 16-28 | Testing, polish, documentation, merge to main |
+| 2026-01-22 - 2026-01-23 | 29-36 | Post-merge: autonomous mode, codemap integration refinement, architecture comparison |
 
 ---
 
@@ -197,6 +198,95 @@ Implementation was structured into 8 phases, each scoped for ~100k-125k tokens o
 
 ---
 
+## Phase 9: Post-Merge Developments (Sessions 29-36)
+
+**Timeline**: 2026-01-22 to 2026-01-23
+
+After merging the core RLM implementation to main, development focused on new capabilities and refinement of the integration strategy.
+
+### Key Themes
+
+1. **Dual-Mode Architecture** - Established complementary approaches for different context sizes
+2. **Tool Restriction** - Ensuring RLM-specific tools are only accessible in appropriate contexts
+3. **Codemap Refinement** - Narrowing scope from broad integration to focused, high-impact capabilities
+4. **Architecture Comparison** - Analyzing differences between pi-rlm and the original RLM paper implementation
+
+### New Agent: rlm-autonomous
+
+**Concept**: A fully delegated agent pattern for handling massive files without consuming main agent context.
+
+**Key Characteristics**:
+- Agent drives its own REPL session independently
+- Target scope: 5-25 interactions before synthesis
+- Uses `google/gemini-2.5-flash` model
+- Tools: `bash`, `read` (no direct file access to main agent)
+
+**Workflow**:
+1. Initialize REPL session with `python3 ~/skills/rlm/scripts/rlm_repl.py init <file>`
+2. Explore structure with `peek()` and `grep()`
+3. Use `llm_query()` and `llm_query_batch()` for semantic analysis
+4. Accumulate findings with `add_buffer()`
+5. Return synthesized final answer
+
+**Use Case**: Complementary to agent-driven pi-rlm:
+- **pi read tool**: Small context
+- **pi-rlm (agent-driven)**: Medium/large context (main agent steers loop)
+- **rlm-autonomous (fully delegated)**: Massive context (subagent owns entire session)
+
+### Codemap Integration V2
+
+**Decision**: Deferred implementation after plan refinement.
+
+**Key Insights**:
+- Original plan was too broad and unfocused
+- Shifted to ruthless evaluation: only implement capabilities that demonstrably improve RLM performance, accuracy, and speed for coding tasks
+- Focus narrowed to: parsing, chunking, analyzing, reasoning, and subagent assignment for code
+
+**Documents Created** (planning, not implementation):
+- `devdocs/codemap/CODEMAP_INTEGRATION_V2_BRAINSTORM.md` - Full exploration of structure providers pattern
+- `devdocs/codemap/STRUCTURE_PROVIDERS_PLAN.md` - Actionable implementation plan with phases and tasks
+
+**Architecture Decisions** (planned):
+- `providers/` directory for clean separation of structure analysis logic
+- Python via stdlib `ast` for zero external dependencies
+- Codemap integration for TS/JS/Rust/C++ (integrate rather than reimplement)
+- Agent-driven multi-file context approach (upgradable later)
+- Defer caching decision until implementation phase
+
+### Tool Access Control
+
+**Issue**: `read-chunk` tool was only restricted by its description from non-RLM agents.
+
+**Resolution**:
+- Confirmed need for deterministic restriction to RLM contexts
+- Moved to relative path location for portability
+- Verified tool loading and accessibility through testing
+
+### Documentation Updates
+
+1. **README.md** - Updated with dual-mode architecture documentation
+2. **agents/rlm-autonomous.md** - New agent definition (5.6KB)
+
+### Bugs and Issues
+
+1. **Model Configuration Error** - rlm-autonomous initially configured with `google-antigravity/gemini-3-flash`; corrected to `google/gemini-2.5-flash`
+2. **Tool Access** - Investigated deterministic restriction mechanisms for RLM-specific tools
+
+### Testing Performed
+
+- Verified `read-chunk` tool loaded into main pi environment
+- Tested RLM skill with subagent to confirm `read-chunk` accessibility
+- Tested rlm-autonomous agent with progressively harder queries (including War and Peace analysis task)
+
+### Code Changes
+
+- Created `agents/rlm-autonomous.md` agent definition
+- Symlinked to `~/.pi/agent/agents/rlm-autonomous.md` for activation
+- Updated README.md with dual-mode architecture documentation
+- Created `feat/codemap-integration-v2` branch (documents created but implementation deferred)
+
+---
+
 ## Lessons Learned
 
 1. **Pivot early** - Codemap integration was ambitious; paper alignment provided clearer scope
@@ -204,21 +294,37 @@ Implementation was structured into 8 phases, each scoped for ~100k-125k tokens o
 3. **Option A often wins** - Simple subprocess approach beat complex IPC alternatives
 4. **Handle system complexity** - Lazy evaluation helpful but UX needs iteration
 5. **Meta-testing works** - Using pi-rlm to analyze its own development proved the tool's effectiveness
+6. **Complementary architectures** - Agent-driven and fully delegated approaches serve different use cases; both valuable
+7. **Ruthless scoping** - Narrowing focus to demonstrably high-impact features prevents over-engineering
 
 ---
 
 ## Current State
 
 The project successfully implements the core RLM paper concepts:
+
+**Core RLM Capabilities**:
 - ✅ Persistent REPL with full content in memory
 - ✅ Recursive LLM queries with depth limits
-- ✅ Smart content-aware chunking
-- ✅ Parallel batch processing
-- ✅ Finalization mechanism
+- ✅ Smart content-aware chunking (Markdown, Code, JSON)
+- ✅ Parallel batch processing with retry logic
+- ✅ Finalization mechanism (`set_final_answer()`)
 
-Future work remains for the more ambitious codemap integration strategies that were originally explored.
+**Dual-Mode Architecture**:
+- ✅ **Agent-driven (pi-rlm)**: Main agent steers REPL loop for medium/large contexts
+- ✅ **Fully delegated (rlm-autonomous)**: Subagent owns entire REPL session for massive contexts
+
+**Testing & Quality**:
+- ✅ 260 unit tests across 8 test files
+- ✅ 6 experience tests covering real-world workflows
+- ✅ All tests passing
+
+**Future Work**:
+- Focused codemap integration for high-value coding capabilities (parsing, chunking, analyzing, reasoning)
+- Chunk boundary quality inspection tooling
+- Session management ergonomics improvements
 
 ---
 
 *Document generated: 2026-01-22*
-*Source: 28 pi sessions, 23.7M characters analyzed using RLM skill*
+*Source: 36 pi sessions, 25.0M characters analyzed using RLM skill*
