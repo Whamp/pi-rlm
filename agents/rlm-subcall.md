@@ -2,6 +2,7 @@
 name: rlm-subcall
 description: Sub-LLM for RLM chunk extraction. Given a chunk file and query, extracts relevant info as JSON.
 tools: read_chunk
+extensions: ~/skills/rlm/extensions/rlm_tools.ts
 model: google-antigravity/gemini-3-flash
 max-output-chars: 5000
 ---

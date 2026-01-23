@@ -1,6 +1,6 @@
 # pi-rlm
 
-An RLM (Recursive Language Model) extension for [pi](https://github.com/mariozechner/pi-coding-agent), enabling processing of extremely large context files that exceed typical LLM context windows.
+An RLM (Recursive Language Model) skill for [pi](https://github.com/mariozechner/pi-coding-agent), enabling processing of extremely large context files that exceed typical LLM context windows.
 
 Based on the RLM pattern from [arXiv:2512.24601](https://arxiv.org/abs/2512.24601).
 
@@ -8,25 +8,9 @@ Originally a fork of this claude code minimal implementation [claude_code_RLM](h
 
 ## Prerequisites
 
-This extension requires the **subagent extension** for pi, which enables delegating tasks to specialized sub-agents.
+This skill requires the **subagent tool** for pi. The subagent tool is included with pi as a bundled extension.
 
-### Installing the Subagent Extension
-
-The subagent extension is included in this repo under `extensions/subagent/`.
-
-```bash
-# Copy or symlink to your pi extensions directory
-cp -r extensions/subagent ~/.pi/agent/extensions/
-
-# Or symlink for easier updates
-ln -s $(pwd)/extensions/subagent ~/.pi/agent/extensions/subagent
-```
-
-Verify it's working by checking if `subagent` appears in pi's available tools.
-
-> **Note:** The subagent extension spawns separate pi processes to handle delegated tasks. Each sub-agent runs in an isolated context, which is essential for the RLM pattern where chunk processing must not pollute the main context.
->
-> See `extensions/subagent/README.md` for full documentation on the subagent tool.
+> **Note:** The subagent tool spawns separate pi processes to handle delegated tasks. Each sub-agent runs in an isolated context, which is essential for the RLM pattern where chunk processing must not pollute the main context.
 
 ## What is RLM?
 
@@ -57,7 +41,7 @@ The Recursive Language Model pattern breaks down large documents into manageable
 # Clone the repo
 git clone https://github.com/Whamp/pi-rlm.git ~/projects/pi-rlm
 
-# Symlink the skill
+# Symlink the skill (includes the read_chunk extension)
 ln -s ~/projects/pi-rlm/skills/rlm ~/skills/rlm
 
 # Symlink the agent
@@ -70,12 +54,14 @@ ln -s ~/projects/pi-rlm/agents/rlm-subcall.md ~/.pi/agent/agents/rlm-subcall.md
 # Clone the repo
 git clone https://github.com/Whamp/pi-rlm.git /tmp/pi-rlm
 
-# Copy the skill
+# Copy the skill (includes the read_chunk extension)
 cp -r /tmp/pi-rlm/skills/rlm ~/skills/
 
 # Copy the agent
 cp /tmp/pi-rlm/agents/rlm-subcall.md ~/.pi/agent/agents/
 ```
+
+> **Note:** The `read_chunk` tool (used by the rlm-subcall agent to read large chunks without truncation) is bundled with the skill at `skills/rlm/extensions/rlm_tools.ts`. The agent automatically loads this extension when spawned—no manual extension installation required.
 
 ## Usage
 
