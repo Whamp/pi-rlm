@@ -1,6 +1,6 @@
 ---
 name: rlm
-description: Process files too large to fit in context (>100KB, >2000 lines). Uses Python REPL for structural analysis, LLM queries for semantic reasoning, and subagents for final synthesis. Triggers - large file, big document, massive log, full codebase, entire repo, long transcript, context window exceeded.
+description: "Process files too large to fit in context (>100KB, >2000 lines). Uses Python REPL for structural analysis, LLM queries for semantic reasoning, and subagents for final synthesis. Triggers - large file, big document, massive log, full codebase, entire repo, long transcript, context window exceeded."
 ---
 
 # rlm (Recursive Language Model)
